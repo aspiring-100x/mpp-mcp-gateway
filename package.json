@@ -1,0 +1,86 @@
+{
+    "name": "mpp-mcp-gateway",
+    "version": "0.1.0",
+    "description": "Monetize any MCP server with stablecoin micropayments via MPP on Tempo",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./server": {
+            "types": "./dist/server.d.ts",
+            "import": "./dist/server.js"
+        },
+        "./client": {
+            "types": "./dist/client.d.ts",
+            "import": "./dist/client.js"
+        },
+        "./dashboard": {
+            "types": "./dist/dashboard.d.ts",
+            "import": "./dist/dashboard.js"
+        },
+        "./discovery": {
+            "types": "./dist/discovery.d.ts",
+            "import": "./dist/discovery.js"
+        }
+    },
+    "scripts": {
+        "build": "tsup",
+        "dev": "tsup --watch",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:unit": "vitest run --exclude 'tests/paid-flow.test.ts' --exclude 'tests/sessions-flow.test.ts' --exclude 'tests/access-keys-flow.test.ts'",
+        "example:demo": "tsx examples/in-memory-demo/demo.ts",
+        "example:server": "tsx examples/paid-weather-mcp/server.ts",
+        "example:client": "tsx examples/paid-weather-mcp/client.ts",
+        "example:http:server": "tsx examples/paid-weather-http/server.ts",
+        "example:http:client": "tsx examples/paid-weather-http/client.ts",
+        "example:sse:server": "tsx examples/paid-weather-sse/server.ts",
+        "example:sse:client": "tsx examples/paid-weather-sse/client.ts",
+        "example:streaming:server": "tsx examples/paid-streaming-mcp/server.ts",
+        "example:streaming:client": "tsx examples/paid-streaming-mcp/client.ts",
+        "example:subscription:server": "tsx examples/paid-subscription-mcp/server.ts",
+        "example:subscription:client": "tsx examples/paid-subscription-mcp/client.ts",
+        "example:dashboard:server": "tsx examples/paid-weather-dashboard/server.ts"
+    },
+    "keywords": [
+        "mcp",
+        "mpp",
+        "tempo",
+        "stablecoin",
+        "payments",
+        "ai-agents",
+        "micropayments",
+        "model-context-protocol",
+        "machine-payments-protocol"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.0.0",
+        "mppx": "~0.1.1",
+        "viem": "^2.0.0",
+        "zod": "^4.4.3"
+    },
+    "peerDependencies": {
+        "express": ">=5"
+    },
+    "peerDependenciesMeta": {
+        "express": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.0",
+        "@types/node": "^25.7.0",
+        "express": "^5.0.0",
+        "tsup": "^8.0.0",
+        "tsx": "^4.0.0",
+        "typescript": "^5.4.0",
+        "vitest": "^4.1.6"
+    }
+}
