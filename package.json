@@ -58,7 +58,7 @@
         "model-context-protocol",
         "machine-payments-protocol"
     ],
-    "author": "",
+    "author": "Gaurav Pant",
     "license": "MIT",
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.0.0",
