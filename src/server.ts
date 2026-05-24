@@ -96,8 +96,21 @@ export class PaidMcpServer {
     private revenueUnitsByTool: Map<string, bigint>
     private startTime: number
     private accessKeyStore: Store.Store
-    private callLog: CallLogEntry[]
+    /**
+     * Fixed-size ring buffer of recent calls. Pre-allocated to
+     * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
+     * fill state, which matters under sustained high-throughput load
+     * where the previous splice-based implementation became a bottleneck.
+     *
+     * Slots beyond the current count hold `undefined` until they're
+     * written. `callLogCount` tracks how many slots have been populated
+     * (saturates at capacity). `callLogWriteIndex` points to the next
+     * slot to write, wrapping modulo capacity.
+     */
+    private callLog: Array<CallLogEntry | undefined>
     private callLogCapacity: number
+    private callLogCount: number
+    private callLogWriteIndex: number
 
     constructor(config: PaidMcpServerConfig) {
         this.config = {
@@ -117,7 +130,15 @@ export class PaidMcpServer {
             (config.accessKeyStore as Store.Store | undefined) ?? Store.memory()
 
         this.callLogCapacity = Math.max(0, config.callLogSize ?? 1000)
-        this.callLog = []
+        // Pre-allocate the ring buffer so `appendCall` never has to grow
+        // the array. When capacity is 0 we keep an empty array — the
+        // append path short-circuits before writing.
+        this.callLog =
+            this.callLogCapacity === 0
+                ? []
+                : new Array<CallLogEntry | undefined>(this.callLogCapacity).fill(undefined)
+        this.callLogCount = 0
+        this.callLogWriteIndex = 0
 
         // Build mppx payment handler with Tempo charge + session methods and
         // the MCP SDK transport. This makes each paid call issue a
@@ -475,12 +496,13 @@ export class PaidMcpServer {
         )
     }
 
-    /** @internal Append an entry to the bounded call log. */
+    /** @internal Append an entry to the bounded call log. O(1). */
     private appendCall(entry: CallLogEntry): void {
         if (this.callLogCapacity === 0) return
-        this.callLog.push(entry)
-        if (this.callLog.length > this.callLogCapacity) {
-            this.callLog.splice(0, this.callLog.length - this.callLogCapacity)
+        this.callLog[this.callLogWriteIndex] = entry
+        this.callLogWriteIndex = (this.callLogWriteIndex + 1) % this.callLogCapacity
+        if (this.callLogCount < this.callLogCapacity) {
+            this.callLogCount++
         }
     }
 
@@ -488,12 +510,26 @@ export class PaidMcpServer {
      * Retrieve the most recent N calls in newest-first order. Used by the
      * dashboard's `/api/calls` endpoint and by callers that want to render
      * their own activity feed.
+     *
+     * Walks the ring buffer backwards from the most recent write, so the
+     * result is always newest-first regardless of where in the buffer the
+     * write head currently sits.
      */
     getRecentCalls(limit = 100): CallLogEntry[] {
-        const n = Math.max(0, Math.min(limit, this.callLog.length))
+        const n = Math.max(0, Math.min(limit, this.callLogCount))
         if (n === 0) return []
-        // Slice from the end and reverse so newest is first.
-        return this.callLog.slice(-n).reverse()
+        const out: CallLogEntry[] = new Array(n)
+        // Newest entry sits at (writeIndex - 1), walking back wraps to
+        // capacity - 1 when we hit zero. Each entry we pass is one step
+        // older than the previous.
+        let cursor =
+            (this.callLogWriteIndex - 1 + this.callLogCapacity) % this.callLogCapacity
+        for (let i = 0; i < n; i++) {
+            // Slot is guaranteed populated because i < callLogCount.
+            out[i] = this.callLog[cursor] as CallLogEntry
+            cursor = (cursor - 1 + this.callLogCapacity) % this.callLogCapacity
+        }
+        return out
     }
 
     /**
