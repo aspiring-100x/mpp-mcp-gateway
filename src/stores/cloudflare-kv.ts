@@ -29,7 +29,9 @@
  * who skim documentation still get a clear signal at runtime.
  */
 
-import { StoreError, type MppMcpStore } from './types.js'
+import { StoreError } from '../errors.js'
+import type { Logger } from '../logger.js'
+import { type MppMcpStore } from './types.js'
 
 /**
  * Minimal subset of the Cloudflare Workers KV namespace API we depend
@@ -73,9 +75,16 @@ export interface CloudflareKvStoreOptions {
      * @default false
      */
     suppressConsistencyWarning?: boolean
+
+    /**
+     * Optional logger. If supplied the construction warning fires
+     * through it; otherwise it goes to `console.warn`. Useful when the
+     * gateway has a configured logger and you want all output unified.
+     */
+    logger?: Logger
 }
 
-const CONSTRUCTOR_WARNING = `[mpp-mcp-gateway] Cloudflare KV store constructed. ` +
+const CONSTRUCTOR_WARNING = `Cloudflare KV store constructed. ` +
     `KV is eventually consistent and update() is best-effort — concurrent ` +
     `writers across regions may produce small over-issuance windows. ` +
     `This is acceptable for access-key stores but unsafe for session ` +
@@ -92,8 +101,14 @@ export function createCloudflareKvStore(
     const ttl = options.ttlSeconds
 
     if (!options.suppressConsistencyWarning) {
-        // eslint-disable-next-line no-console
-        console.warn(CONSTRUCTOR_WARNING)
+        if (options.logger) {
+            options.logger.warn(CONSTRUCTOR_WARNING, {
+                component: 'stores.cloudflare-kv',
+            })
+        } else {
+            // eslint-disable-next-line no-console
+            console.warn(`[mpp-mcp-gateway] ${CONSTRUCTOR_WARNING}`)
+        }
     }
 
     const fullKey = (k: string): string => `${prefix}${k}`
@@ -196,12 +211,11 @@ export function createCloudflareKvStore(
  * Exported so it can be invoked from the server constructor without
  * coupling the server module to Cloudflare specifics.
  */
-export const CLOUDFLARE_KV_SESSION_WARNING = `[mpp-mcp-gateway] ` +
-    `Cloudflare KV is configured as the session store. KV's eventual ` +
-    `consistency makes voucher state unsafe to share across edge ` +
-    `regions: divergent vouchers will cause on-chain settlement to ` +
-    `fail. Use Durable Objects, an Upstash-backed store, or run the ` +
-    `gateway in a single region instead.`
+export const CLOUDFLARE_KV_SESSION_WARNING = `Cloudflare KV is configured ` +
+    `as the session store. KV's eventual consistency makes voucher state ` +
+    `unsafe to share across edge regions: divergent vouchers will cause ` +
+    `on-chain settlement to fail. Use Durable Objects, an Upstash-backed ` +
+    `store, or run the gateway in a single region instead.`
 
 function parseValue<T>(raw: string): T {
     try {

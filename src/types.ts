@@ -6,6 +6,8 @@
 
 import type { z } from 'zod'
 
+import type { Logger } from './logger.js'
+
 /** Pricing model for a paid MCP tool. */
 export type PricingModel =
     | { type: 'per-call'; amount: string }
@@ -150,6 +152,15 @@ export interface PaidMcpServerConfig {
      * @default 1000
      */
     callLogSize?: number
+    /**
+     * Optional structured logger. The library uses this for runtime
+     * events (access-key issuance, session lifecycle, internal errors).
+     * Defaults to a console logger that writes JSON to stderr with
+     * automatic redaction of sensitive fields. Pass `silentLogger()`
+     * for tests and silent production deployments, or a custom adapter
+     * built on pino, winston, or your platform's logging stack.
+     */
+    logger?: Logger
 }
 
 /** Configuration for creating a payment-enabled MCP client. */
@@ -172,6 +183,13 @@ export interface PaidMcpClientConfig {
     maxSessionDeposit?: string
     /** Network — defaults to testnet. */
     network?: 'mainnet' | 'testnet'
+    /**
+     * Optional structured logger. Used for client-side events
+     * (cap-exceeded warnings, payment retries, internal errors).
+     * Defaults to a console logger that writes JSON to stderr with
+     * automatic redaction of sensitive fields.
+     */
+    logger?: Logger
 }
 
 /** Runtime statistics for a paid MCP server. */

@@ -33,6 +33,7 @@ import {
     SessionDepositCapExceededError,
     SpendingCapExceededError,
 } from './errors.js'
+import { defaultLogger, type Logger } from './logger.js'
 import type { PaidCallResult, PaidMcpClientConfig } from './types.js'
 
 // Re-export for backward compatibility — callers that did
@@ -56,6 +57,7 @@ export class PaidMcpClient {
     private config: Required<Pick<PaidMcpClientConfig, 'network'>> & PaidMcpClientConfig
     private rawClient: Client
     private wrapped!: ReturnType<typeof buildWrapped>
+    private logger: Logger
     private maxPerCall: number
     private maxTotal: number
     private maxSessionDeposit: number
@@ -80,6 +82,11 @@ export class PaidMcpClient {
             ...config,
             network: config.network ?? 'testnet',
         }
+
+        this.logger = (config.logger ?? defaultLogger()).child({
+            component: 'paid-mcp-client',
+            client: config.name,
+        })
 
         this.maxPerCall = parseFloat(config.maxPerCall ?? '1.00')
         this.maxTotal = parseFloat(config.maxTotal ?? '100.00')

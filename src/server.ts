@@ -45,6 +45,7 @@ import {
     TEMPO_TESTNET,
 } from './constants.js'
 import { ConfigurationError, InternalError } from './errors.js'
+import { defaultLogger, type Logger } from './logger.js'
 import {
     bridgeMppxStore,
     createMemoryStore,
@@ -103,6 +104,8 @@ export class PaidMcpServer {
     private revenueUnitsByTool: Map<string, bigint>
     private startTime: number
     private accessKeyStore: MppMcpStore
+    /** Structured logger for runtime events. Never null after construction. */
+    private logger: Logger
     /**
      * Fixed-size ring buffer of recent calls. Pre-allocated to
      * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
@@ -126,6 +129,13 @@ export class PaidMcpServer {
             network: config.network ?? 'testnet',
         }
 
+        // Resolve the logger first so subsequent setup steps (store
+        // bridging, validation warnings) can route through it.
+        this.logger = (config.logger ?? defaultLogger()).child({
+            component: 'paid-mcp-server',
+            server: config.name,
+        })
+
         // Validate access-key pricing up-front so misconfiguration fails fast.
         for (const tool of config.tools) {
             if (tool.pricing?.type === 'access-key') {
@@ -136,9 +146,10 @@ export class PaidMcpServer {
         // Resolve the access-key store. Three cases:
         //   1. User passed a four-method MppMcpStore → use directly.
         //   2. User passed a legacy three-method store → bridge it
-        //      (best-effort `update`, with a one-shot warning).
+        //      (best-effort `update`, with a one-shot warning routed
+        //      through the configured logger).
         //   3. Nothing passed → in-memory default with atomic update.
-        this.accessKeyStore = resolveStore(config.accessKeyStore)
+        this.accessKeyStore = resolveStore(config.accessKeyStore, this.logger)
 
         this.callLogCapacity = Math.max(0, config.callLogSize ?? 1000)
         // Pre-allocate the ring buffer so `appendCall` never has to grow
@@ -155,7 +166,7 @@ export class PaidMcpServer {
         // the MCP SDK transport. This makes each paid call issue a
         // McpError(-32042) on first invocation and attach a receipt via _meta
         // on the retry.
-        this.mppx = createMppxPayment(this.config)
+        this.mppx = createMppxPayment(this.config, this.logger)
 
         // Create the underlying MCP server
         this.mcp = new McpServer({
@@ -623,7 +634,8 @@ function createMppxPayment(
     config: Required<
         Pick<PaidMcpServerConfig, 'currency' | 'network' | 'recipient' | 'secretKey'>
     > &
-        PaidMcpServerConfig
+        PaidMcpServerConfig,
+    logger: Logger
 ) {
     const useSessions = hasSessionPricing(config.tools)
 
@@ -648,7 +660,7 @@ function createMppxPayment(
         // three-method → bridge, nothing → in-memory default. mppx
         // only consumes get/put/delete from the store, so any of the
         // three forms is structurally compatible.
-        const store = resolveStore(config.sessionStore)
+        const store = resolveStore(config.sessionStore, logger)
 
             ; (tempoParams as Record<string, unknown>).escrowContract = escrow
             ; (tempoParams as Record<string, unknown>).store = store
@@ -673,12 +685,16 @@ function createMppxPayment(
  *   1. `undefined` → fresh in-memory store with atomic update.
  *   2. Already an `MppMcpStore` (has `update`) → use directly.
  *   3. Legacy three-method store (mppx's older `Store.Store`) → bridge
- *      with a best-effort `update` shim (logs a one-shot warning).
+ *      with a best-effort `update` shim (logs a one-shot warning
+ *      through the supplied logger).
  */
-function resolveStore(input: unknown): MppMcpStore {
+function resolveStore(input: unknown, logger?: Logger): MppMcpStore {
     if (input === undefined || input === null) return createMemoryStore()
     if (isMppMcpStore(input)) return input
-    return bridgeMppxStore(input as Parameters<typeof bridgeMppxStore>[0])
+    return bridgeMppxStore(
+        input as Parameters<typeof bridgeMppxStore>[0],
+        logger
+    )
 }
 
 /** @internal Normalize a handler result into the MCP CallToolResult shape. */

@@ -69,6 +69,19 @@ export {
     type MppMcpErrorCode,
 } from './errors.js'
 export {
+    arrayLogger,
+    consoleLogger,
+    defaultLogger,
+    silentLogger,
+    withRedaction,
+    type ArrayLogEntry,
+    type ConsoleLoggerOptions,
+    type LogContext,
+    type LogLevel,
+    type Logger,
+    type RedactionOptions,
+} from './logger.js'
+export {
     Store,
     bridgeMppxStore,
     createCloudflareKvStore,

@@ -16,16 +16,24 @@
  * The bridge is invoked transparently inside the server constructor
  * when a caller provides a legacy store via `accessKeyStore` or
  * `sessionStore` config. It also runs once per bridged store to log a
- * one-shot warning to stderr so operators know they've opted into the
- * weaker consistency tier.
+ * one-shot warning so operators know they've opted into the weaker
+ * consistency tier.
  */
 
 import {
     isMppMcpStore,
-    StoreError,
     type LegacyThreeMethodStore,
     type MppMcpStore,
 } from './types.js'
+import { StoreError } from '../errors.js'
+import type { Logger } from '../logger.js'
+
+const WARNING_MESSAGE =
+    `Legacy three-method store passed to gateway. update() will be ` +
+    `best-effort and is NOT atomic under concurrent writers. For ` +
+    `production access-key stores use createMemoryStore() (single ` +
+    `instance), createUpstashStore() (multi-instance), or a custom ` +
+    `MppMcpStore implementation with native CAS support.`
 
 /**
  * Wrap a legacy three-method store. If the input already implements
@@ -33,25 +41,28 @@ import {
  * returned unchanged — the bridge is a no-op for native adapters.
  *
  * The first time a legacy store is bridged in a process, a warning is
- * logged to stderr identifying the limitation. Subsequent bridges of
- * the same instance are silent.
+ * logged identifying the limitation. Subsequent bridges of the same
+ * instance are silent.
+ *
+ * @param store The legacy store to wrap, or a native MppMcpStore (returned as-is).
+ * @param logger Optional logger. If supplied the warning fires through
+ *   it; otherwise it goes to `console.warn`. The server passes its
+ *   configured logger when bridging at construction time.
  */
 export function bridgeMppxStore(
-    store: LegacyThreeMethodStore | MppMcpStore
+    store: LegacyThreeMethodStore | MppMcpStore,
+    logger?: Logger
 ): MppMcpStore {
     if (isMppMcpStore(store)) return store
 
     if (!warned.has(store)) {
         warned.add(store)
-        // eslint-disable-next-line no-console
-        console.warn(
-            `[mpp-mcp-gateway] A legacy three-method store was passed to ` +
-            `the gateway. update() will be best-effort and is NOT atomic ` +
-            `under concurrent writers. For production access-key stores ` +
-            `use createMemoryStore() (single instance), createUpstashStore() ` +
-            `(multi-instance), or a custom MppMcpStore implementation with ` +
-            `native CAS support.`
-        )
+        if (logger) {
+            logger.warn(WARNING_MESSAGE, { component: 'stores.bridge' })
+        } else {
+            // eslint-disable-next-line no-console
+            console.warn(`[mpp-mcp-gateway] ${WARNING_MESSAGE}`)
+        }
     }
 
     return {

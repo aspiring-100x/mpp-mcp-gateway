@@ -18,6 +18,7 @@ import {
     PaidMcpServer,
     PaidMcpServerConfig,
     PaidMcpClientConfig,
+    silentLogger,
 } from '../src/index.js'
 
 /**
@@ -52,6 +53,7 @@ export async function makeConnectedPair(
         secretKey: DEMO_SECRET,
         network: 'testnet',
         tools: opts.tools,
+        logger: silentLogger(),
         ...opts.serverConfig,
     })
 
@@ -62,6 +64,7 @@ export async function makeConnectedPair(
         maxPerCall: '1.00',
         maxTotal: '10.00',
         network: 'testnet',
+        logger: silentLogger(),
         ...opts.clientConfig,
     })
 
