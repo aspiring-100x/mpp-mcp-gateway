@@ -161,6 +161,33 @@ export interface PaidMcpServerConfig {
      * built on pino, winston, or your platform's logging stack.
      */
     logger?: Logger
+    /**
+     * Default drain timeout for {@link PaidMcpServer.close}, in
+     * milliseconds. The default of 30 seconds matches typical
+     * Kubernetes `terminationGracePeriodSeconds` minus a buffer for
+     * Pod cleanup.
+     *
+     * Per-call overrides via `close({ timeoutMs })` always win over
+     * this default.
+     *
+     * @default 30_000
+     */
+    drainTimeoutMs?: number
+    /**
+     * Optional callback invoked once when {@link PaidMcpServer.close}
+     * begins, before the gateway starts draining in-flight calls.
+     *
+     * Use it to start your own cleanup work in parallel (close
+     * database connections, flush metrics, finalize webhook batches).
+     * The hook may return a promise; `close()` awaits it before
+     * returning, but the drain timer runs concurrently — long-running
+     * cleanup must finish within the drain budget or `close()` resolves
+     * before your hook does.
+     *
+     * Throwing or rejecting from the hook is logged at `error` level
+     * but does not abort the shutdown.
+     */
+    onShutdown?: () => void | Promise<void>
 }
 
 /** Configuration for creating a payment-enabled MCP client. */

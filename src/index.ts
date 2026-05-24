@@ -64,6 +64,8 @@ export {
     InternalError,
     isMppMcpError,
     MppMcpError,
+    ShutdownTimeoutError,
+    ShuttingDownError,
     StoreError,
     ValidationError,
     type MppMcpErrorCode,

@@ -54,6 +54,10 @@ export type MppMcpErrorCode =
     | 'store-invalid-value'
     /** Optimistic-concurrency retry budget exhausted (Upstash-style backends). */
     | 'cas-exhausted'
+    /** A new call was rejected because the gateway is shutting down. */
+    | 'shutting-down'
+    /** Drain didn't finish before the configured timeout. */
+    | 'shutdown-timeout'
     /** Internal invariant violated — file a bug if you see this. */
     | 'internal'
 
@@ -227,6 +231,54 @@ export class SessionDepositCapExceededError extends MppMcpError {
         )
         this.suggested = args.suggested
         this.limit = args.limit
+    }
+}
+
+/**
+ * Thrown when a tool call is invoked after the server has begun
+ * shutting down. The gateway refuses new work during drain so
+ * existing calls can complete cleanly. Clients should retry against
+ * a different replica or wait until rollout finishes.
+ */
+export class ShuttingDownError extends MppMcpError {
+    readonly code = 'shutting-down' as const
+
+    /** Tool the rejected call targeted. */
+    readonly tool: string
+
+    constructor(args: { tool: string }) {
+        super(
+            `Gateway is shutting down and is no longer accepting new tool calls. ` +
+            `The call to "${args.tool}" was rejected. Retry against another replica or wait for rollout to complete.`
+        )
+        this.tool = args.tool
+    }
+}
+
+/**
+ * Thrown by {@link PaidMcpServer.close} when in-flight tool calls
+ * fail to complete within the configured drain timeout. The error
+ * carries the count of still-pending calls so operators can decide
+ * whether to extend the timeout, force-kill, or investigate stuck
+ * handlers.
+ */
+export class ShutdownTimeoutError extends MppMcpError {
+    readonly code = 'shutdown-timeout' as const
+
+    /** Number of calls still in flight when the timeout fired. */
+    readonly inFlight: number
+
+    /** Configured timeout, in milliseconds. */
+    readonly timeoutMs: number
+
+    constructor(args: { inFlight: number; timeoutMs: number }) {
+        super(
+            `Shutdown timed out after ${args.timeoutMs}ms with ${args.inFlight} ` +
+            `in-flight call${args.inFlight === 1 ? '' : 's'} still pending. ` +
+            `Increase the drain timeout, investigate hung handlers, or force-terminate.`
+        )
+        this.inFlight = args.inFlight
+        this.timeoutMs = args.timeoutMs
     }
 }
 

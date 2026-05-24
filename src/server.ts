@@ -44,7 +44,7 @@ import {
     TEMPO_MAINNET,
     TEMPO_TESTNET,
 } from './constants.js'
-import { ConfigurationError, InternalError } from './errors.js'
+import { ConfigurationError, InternalError, ShutdownTimeoutError, ShuttingDownError } from './errors.js'
 import { defaultLogger, type Logger } from './logger.js'
 import {
     bridgeMppxStore,
@@ -106,6 +106,27 @@ export class PaidMcpServer {
     private accessKeyStore: MppMcpStore
     /** Structured logger for runtime events. Never null after construction. */
     private logger: Logger
+    /**
+     * In-flight tool calls — incremented when a call enters the
+     * wrapping handler, decremented when it leaves (success or error).
+     * Drives the drain logic in {@link PaidMcpServer.close}.
+     */
+    private inFlight: number
+    /**
+     * Set to `true` once {@link PaidMcpServer.close} begins. New tool
+     * calls observed after this point are rejected with
+     * {@link ShuttingDownError}; in-flight calls run to completion.
+     */
+    private shuttingDown: boolean
+    /**
+     * Cached close promise so calling `close()` twice doesn't kick off
+     * two parallel shutdowns. Idempotent semantics.
+     */
+    private closePromise: Promise<void> | null
+    /** Default drain timeout in ms; overridable per-call via close({ timeoutMs }). */
+    private defaultDrainTimeoutMs: number
+    /** Optional shutdown hook fired once when drain begins. */
+    private onShutdown: (() => void | Promise<void>) | undefined
     /**
      * Fixed-size ring buffer of recent calls. Pre-allocated to
      * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
@@ -199,6 +220,12 @@ export class PaidMcpServer {
             uptimeMs: 0,
             startedAt: new Date().toISOString(),
         }
+
+        this.inFlight = 0
+        this.shuttingDown = false
+        this.closePromise = null
+        this.defaultDrainTimeoutMs = config.drainTimeoutMs ?? 30_000
+        this.onShutdown = config.onShutdown
     }
 
     /**
@@ -214,86 +241,22 @@ export class PaidMcpServer {
                 _meta?: Record<string, unknown>
             }
         ) => {
-            const start = Date.now()
-            const currentCalls = this.stats.callsByTool[tool.name] ?? 0
+            // Shutdown gate: refuse new work after `close()` has begun.
+            // This runs before any pricing or payment logic so a closing
+            // gateway never issues a 402 it can't fulfill.
+            if (this.shuttingDown) {
+                throw new ShuttingDownError({ tool: tool.name })
+            }
 
+            // In-flight tracking. Increment before any awaits so the
+            // counter accurately reflects every observable execution
+            // unit. The `try/finally` guarantees decrement on every
+            // return path (success, thrown error, 402 challenge).
+            this.inFlight++
             try {
-                // Free tool — no payment flow.
-                if (!tool.pricing) {
-                    this.stats.totalCalls++
-                    this.stats.freeCalls++
-                    this.stats.callsByTool[tool.name] = currentCalls + 1
-                    const result = await tool.handler(args)
-                    this.appendCall({
-                        tool: tool.name,
-                        timestamp: new Date().toISOString(),
-                        durationMs: Date.now() - start,
-                        paid: false,
-                        paymentMode: 'free',
-                    })
-                    return toMcpResult(result)
-                }
-
-                // Access-key path: try to redeem first, fall through to payment.
-                if (tool.pricing.type === 'access-key') {
-                    return await this.runAccessKey(tool, args, extra, start)
-                }
-
-                // Paid path — choose the right intent.
-                if (tool.pricing.type === 'session') {
-                    return await this.runSession(tool, args, extra, start)
-                }
-
-                // per-call / tiered → charge intent
-                const amount = priceFor(tool.pricing, currentCalls)!
-                const charge = this.mppx.charge({
-                    amount,
-                    currency,
-                    recipient,
-                    description: tool.description,
-                })
-
-                const outcome = await charge(extra)
-                if (outcome.status === 402) throw outcome.challenge
-
-                const result = await tool.handler(args)
-                this.recordPaidCall(tool.name, amount)
-                this.appendCall({
-                    tool: tool.name,
-                    timestamp: new Date().toISOString(),
-                    durationMs: Date.now() - start,
-                    paid: true,
-                    paymentMode: tool.pricing.type, // 'per-call' | 'tiered'
-                    amount,
-                })
-                return outcome.withReceipt(toMcpResult(result))
-            } catch (err) {
-                // 402 challenges flow through the catch but they aren't real
-                // failures — they're control-flow signals to the client. We
-                // detect them by the presence of `data.challenges` and skip
-                // logging them as errors.
-                if (!isPaymentRequired(err)) {
-                    this.appendCall({
-                        tool: tool.name,
-                        timestamp: new Date().toISOString(),
-                        durationMs: Date.now() - start,
-                        paid: false,
-                        paymentMode: tool.pricing
-                            ? tool.pricing.type === 'access-key'
-                                ? 'access-key'
-                                : tool.pricing.type === 'session'
-                                    ? 'session'
-                                    : tool.pricing.type === 'tiered'
-                                        ? 'tiered'
-                                        : 'per-call'
-                            : 'free',
-                        error:
-                            err instanceof Error
-                                ? err.message
-                                : String(err ?? 'unknown error'),
-                    })
-                }
-                throw err
+                return await this.runWrappedHandler(tool, args, extra, currency, recipient)
+            } finally {
+                this.inFlight--
             }
         }
 
@@ -305,6 +268,103 @@ export class PaidMcpServer {
             },
             handler as never
         )
+    }
+
+    /**
+     * @internal The original wrapping-handler body, extracted so the
+     * registerTool path can compose shutdown gating + in-flight
+     * tracking around it without losing readability.
+     */
+    private async runWrappedHandler(
+        tool: PaidToolDefinition,
+        args: Record<string, unknown>,
+        extra: Record<string, unknown> & {
+            _meta?: Record<string, unknown>
+        },
+        currency: `0x${string}`,
+        recipient: `0x${string}`
+    ): Promise<unknown> {
+        const start = Date.now()
+        const currentCalls = this.stats.callsByTool[tool.name] ?? 0
+
+        try {
+            // Free tool — no payment flow.
+            if (!tool.pricing) {
+                this.stats.totalCalls++
+                this.stats.freeCalls++
+                this.stats.callsByTool[tool.name] = currentCalls + 1
+                const result = await tool.handler(args)
+                this.appendCall({
+                    tool: tool.name,
+                    timestamp: new Date().toISOString(),
+                    durationMs: Date.now() - start,
+                    paid: false,
+                    paymentMode: 'free',
+                })
+                return toMcpResult(result)
+            }
+
+            // Access-key path: try to redeem first, fall through to payment.
+            if (tool.pricing.type === 'access-key') {
+                return await this.runAccessKey(tool, args, extra, start)
+            }
+
+            // Paid path — choose the right intent.
+            if (tool.pricing.type === 'session') {
+                return await this.runSession(tool, args, extra, start)
+            }
+
+            // per-call / tiered → charge intent
+            const amount = priceFor(tool.pricing, currentCalls)!
+            const charge = this.mppx.charge({
+                amount,
+                currency,
+                recipient,
+                description: tool.description,
+            })
+
+            const outcome = await charge(extra)
+            if (outcome.status === 402) throw outcome.challenge
+
+            const result = await tool.handler(args)
+            this.recordPaidCall(tool.name, amount)
+            this.appendCall({
+                tool: tool.name,
+                timestamp: new Date().toISOString(),
+                durationMs: Date.now() - start,
+                paid: true,
+                paymentMode: tool.pricing.type, // 'per-call' | 'tiered'
+                amount,
+            })
+            return outcome.withReceipt(toMcpResult(result))
+        } catch (err) {
+            // 402 challenges flow through the catch but they aren't real
+            // failures — they're control-flow signals to the client. We
+            // detect them by the presence of `data.challenges` and skip
+            // logging them as errors.
+            if (!isPaymentRequired(err)) {
+                this.appendCall({
+                    tool: tool.name,
+                    timestamp: new Date().toISOString(),
+                    durationMs: Date.now() - start,
+                    paid: false,
+                    paymentMode: tool.pricing
+                        ? tool.pricing.type === 'access-key'
+                            ? 'access-key'
+                            : tool.pricing.type === 'session'
+                                ? 'session'
+                                : tool.pricing.type === 'tiered'
+                                    ? 'tiered'
+                                    : 'per-call'
+                        : 'free',
+                    error:
+                        err instanceof Error
+                            ? err.message
+                            : String(err ?? 'unknown error'),
+                })
+            }
+            throw err
+        }
     }
 
     /**
@@ -567,6 +627,125 @@ export class PaidMcpServer {
         return this.mcp
     }
 
+    /**
+     * Number of tool calls currently being handled. Useful for
+     * pre-shutdown observability — operators can watch this drop to
+     * zero before signaling pod termination, or report it as a
+     * Prometheus gauge.
+     */
+    getInFlightCount(): number {
+        return this.inFlight
+    }
+
+    /**
+     * Whether the gateway has begun shutting down. Once `true`, new
+     * tool calls are rejected with {@link ShuttingDownError}.
+     */
+    isShuttingDown(): boolean {
+        return this.shuttingDown
+    }
+
+    /**
+     * Initiate a graceful shutdown.
+     *
+     * The shutdown sequence:
+     *   1. Set `shuttingDown` so new tool calls are immediately
+     *      rejected with {@link ShuttingDownError}. In-flight calls
+     *      continue to completion.
+     *   2. Fire the optional `onShutdown` hook (from constructor
+     *      config), letting the operator close database connections,
+     *      flush metrics, etc. Hook errors are logged but do not
+     *      abort the shutdown.
+     *   3. Wait for the in-flight counter to reach zero, polling at a
+     *      short interval. If it doesn't reach zero within
+     *      `timeoutMs`, throw {@link ShutdownTimeoutError} carrying
+     *      the residual count.
+     *   4. Disconnect the underlying MCP transport via `mcp.close()`.
+     *
+     * Idempotent: multiple concurrent calls share the same shutdown
+     * promise and resolve/reject together.
+     *
+     * Recommended wiring under Kubernetes / Fly / similar:
+     *
+     * @example
+     * ```ts
+     * process.on('SIGTERM', async () => {
+     *     try {
+     *         await server.close({ timeoutMs: 25_000 })
+     *         process.exit(0)
+     *     } catch {
+     *         process.exit(1)  // drain timed out
+     *     }
+     * })
+     * ```
+     */
+    async close(options: { timeoutMs?: number } = {}): Promise<void> {
+        // Idempotent: re-use the in-flight shutdown promise on repeat
+        // calls. Two `close()` invocations from different signal
+        // handlers must not double-fire `onShutdown`.
+        if (this.closePromise) return this.closePromise
+
+        const timeoutMs = options.timeoutMs ?? this.defaultDrainTimeoutMs
+        this.shuttingDown = true
+        this.closePromise = this.runShutdown(timeoutMs)
+        return this.closePromise
+    }
+
+    /** @internal Drain + close. Called once via `close()`. */
+    private async runShutdown(timeoutMs: number): Promise<void> {
+        const log = this.logger.child({ phase: 'shutdown' })
+        const drainStart = Date.now()
+        log.info('shutdown initiated', {
+            inFlight: this.inFlight,
+            timeoutMs,
+        })
+
+        // Fire the user hook — error in the hook should not block the
+        // drain. Any hook error gets logged at error level for
+        // diagnostics; we still proceed to drain.
+        if (this.onShutdown) {
+            try {
+                await this.onShutdown()
+            } catch (err) {
+                log.error('onShutdown hook threw — continuing drain', { err })
+            }
+        }
+
+        // Drain loop. Poll the in-flight counter every 50ms until
+        // either it hits zero or we exceed the timeout. We don't use
+        // a single `setTimeout`-and-resolve construct because in-flight
+        // calls finishing should let us exit early; a polling loop
+        // gives us that.
+        const deadline = drainStart + timeoutMs
+        while (this.inFlight > 0 && Date.now() < deadline) {
+            await sleep(50)
+        }
+
+        if (this.inFlight > 0) {
+            const residual = this.inFlight
+            log.error('drain timeout', { inFlight: residual, timeoutMs })
+            throw new ShutdownTimeoutError({
+                inFlight: residual,
+                timeoutMs,
+            })
+        }
+
+        log.info('drain complete', { durationMs: Date.now() - drainStart })
+
+        // Disconnect the MCP transport. mcp.close() may not exist on
+        // every SDK version; tolerate its absence.
+        try {
+            const closer = (this.mcp as unknown as { close?: () => Promise<void> }).close
+            if (typeof closer === 'function') {
+                await closer.call(this.mcp)
+            }
+        } catch (err) {
+            log.warn('mcp.close threw', { err })
+        }
+
+        log.info('shutdown complete')
+    }
+
     /** Current gateway statistics. */
     getStats(): GatewayStats {
         return {
@@ -736,6 +915,11 @@ function isPaymentRequired(err: unknown): boolean {
     if (obj.code === -32042) return true
     if (obj.data && Array.isArray(obj.data.challenges)) return true
     return false
+}
+
+/** @internal Resolve after `ms` milliseconds. */
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
