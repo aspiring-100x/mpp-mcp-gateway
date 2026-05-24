@@ -60,8 +60,16 @@ export {
     type ServiceCategory,
 } from './discovery.js'
 export {
-    Store,
+    ConfigurationError,
+    InternalError,
+    isMppMcpError,
+    MppMcpError,
     StoreError,
+    ValidationError,
+    type MppMcpErrorCode,
+} from './errors.js'
+export {
+    Store,
     bridgeMppxStore,
     createCloudflareKvStore,
     createMemoryStore,

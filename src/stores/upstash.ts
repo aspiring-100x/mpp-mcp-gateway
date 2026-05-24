@@ -13,7 +13,7 @@
  *     the transaction aborts and we retry with the freshly observed
  *     value. After {@link UpstashStoreOptions.maxAttempts} unsuccessful
  *     attempts (default 8), throws a {@link StoreError} with
- *     `code: 'cas-exhausted'`.
+ *     `kind: 'cas-exhausted'`.
  *
  * The `transform` callback may be invoked more than once on contention —
  * see {@link MppMcpStore.update} for the contract.
@@ -81,7 +81,7 @@ export interface UpstashStoreOptions {
 
     /**
      * Maximum number of CAS retries before {@link MppMcpStore.update}
-     * gives up and throws `StoreError(code: 'cas-exhausted')`.
+     * gives up and throws `StoreError(kind: 'cas-exhausted')`.
      *
      * @default 8
      */
@@ -167,7 +167,7 @@ export function createUpstashStore(
                 return parseValue<T>(raw)
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Upstash GET failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -182,7 +182,7 @@ export function createUpstashStore(
                 await client.set(fullKey(key), serialized, opts)
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Upstash SET failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -194,7 +194,7 @@ export function createUpstashStore(
                 await client.del(fullKey(key))
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Upstash DEL failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -214,7 +214,7 @@ export function createUpstashStore(
                     observed = raw === undefined ? null : raw
                 } catch (err) {
                     throw new StoreError({
-                        code: 'backend-error',
+                        kind: 'backend-error',
                         message: `Upstash GET (during update) failed for key "${key}": ${errMessage(err)}`,
                         cause: err,
                     })
@@ -242,7 +242,7 @@ export function createUpstashStore(
                     )
                 } catch (err) {
                     throw new StoreError({
-                        code: 'backend-error',
+                        kind: 'backend-error',
                         message: `Upstash EVAL (during update) failed for key "${key}": ${errMessage(err)}`,
                         cause: err,
                     })
@@ -250,7 +250,7 @@ export function createUpstashStore(
 
                 if (!Array.isArray(scriptResult) || scriptResult.length !== 2) {
                     throw new StoreError({
-                        code: 'backend-error',
+                        kind: 'backend-error',
                         message: `Unexpected Upstash EVAL response shape for key "${key}".`,
                     })
                 }
@@ -264,7 +264,7 @@ export function createUpstashStore(
             }
 
             throw new StoreError({
-                code: 'cas-exhausted',
+                kind: 'cas-exhausted',
                 message: `Atomic update of key "${key}" failed after ${maxAttempts} attempts due to concurrent writers.`,
             })
         },
@@ -276,7 +276,7 @@ function parseValue<T>(raw: string): T {
         return JSON.parse(raw) as T
     } catch (err) {
         throw new StoreError({
-            code: 'invalid-value',
+            kind: 'invalid-value',
             message: `Failed to parse stored value as JSON: ${errMessage(err)}`,
             cause: err,
         })

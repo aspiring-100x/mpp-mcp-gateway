@@ -19,6 +19,8 @@
  * ```
  */
 
+import { ValidationError } from './errors.js'
+
 /**
  * Default decimal precision for revenue arithmetic. Matches Tempo's
  * TIP-20 stablecoin convention (pathUSD, alphaUSD, betaUSD, thetaUSD all
@@ -45,7 +47,7 @@ export const REVENUE_DECIMALS = 6
 export function usdStringToBaseUnits(amount: string, decimals = REVENUE_DECIMALS): bigint {
     const trimmed = amount.trim()
     if (!/^(\d+\.?\d*|\.\d+)$/.test(trimmed)) {
-        throw new Error(
+        throw new ValidationError(
             `Invalid USD amount: "${amount}". Expected a non-negative decimal string ` +
             `like "0.001", "1", or ".5".`
         )
@@ -54,7 +56,7 @@ export function usdStringToBaseUnits(amount: string, decimals = REVENUE_DECIMALS
     const normalized = trimmed.startsWith('.') ? '0' + trimmed : trimmed
     const [whole = '0', fractional = ''] = normalized.split('.')
     if (fractional.length > decimals) {
-        throw new Error(
+        throw new ValidationError(
             `Amount "${amount}" has ${fractional.length} fractional digits, ` +
             `but the currency only supports ${decimals}.`
         )
@@ -81,7 +83,7 @@ export function usdStringToBaseUnits(amount: string, decimals = REVENUE_DECIMALS
 export function baseUnitsToUsdString(units: bigint, decimals = REVENUE_DECIMALS): string {
     if (units === 0n) return '0'
     if (units < 0n) {
-        throw new Error(`Cannot format negative base units: ${units}`)
+        throw new ValidationError(`Cannot format negative base units: ${units}`)
     }
     const divisor = 10n ** BigInt(decimals)
     const whole = units / divisor

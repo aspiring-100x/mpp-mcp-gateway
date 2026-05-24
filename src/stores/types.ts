@@ -100,34 +100,11 @@ export interface LegacyThreeMethodStore {
  * outside the caller's control: network timeouts, CAS retry exhaustion,
  * malformed responses from the backend.
  *
- * Carries a `cause` field with the underlying error when applicable, so
- * operators can diagnose without losing the original stack.
+ * Re-exported from {@link "../errors"} for the unified error taxonomy.
+ * Use `instanceof StoreError` to filter; inspect `.kind` for the
+ * specific failure mode.
  */
-export class StoreError extends Error {
-    /**
-     * Stable identifier for programmatic error handling. Lets callers
-     * branch on `err.code === 'cas-exhausted'` without depending on
-     * message text.
-     */
-    readonly code: 'cas-exhausted' | 'backend-error' | 'invalid-value'
-
-    /**
-     * The originating error, when this `StoreError` wraps one. Use
-     * `error.cause` to inspect the backend's native exception.
-     */
-    override readonly cause?: unknown
-
-    constructor(args: {
-        code: 'cas-exhausted' | 'backend-error' | 'invalid-value'
-        message: string
-        cause?: unknown
-    }) {
-        super(args.message)
-        this.name = 'StoreError'
-        this.code = args.code
-        if (args.cause !== undefined) this.cause = args.cause
-    }
-}
+export { StoreError } from '../errors.js'
 
 /**
  * Type guard for {@link MppMcpStore} — checks whether a candidate

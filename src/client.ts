@@ -28,49 +28,17 @@ import { McpClient } from 'mppx/mcp-sdk/client'
 import { privateKeyToAccount } from 'viem/accounts'
 
 import { ACCESS_KEY_META } from './constants.js'
+import {
+    ConfigurationError,
+    SessionDepositCapExceededError,
+    SpendingCapExceededError,
+} from './errors.js'
 import type { PaidCallResult, PaidMcpClientConfig } from './types.js'
 
-/** Thrown when a tool call would exceed a configured per-call or total cap. */
-export class SpendingCapExceededError extends Error {
-    readonly kind: 'per-call' | 'total'
-    readonly requested: number
-    readonly limit: number
-    readonly totalSpent?: number
-
-    constructor(args: {
-        kind: 'per-call' | 'total'
-        requested: number
-        limit: number
-        totalSpent?: number
-    }) {
-        const msg =
-            args.kind === 'per-call'
-                ? `Tool call requires $${args.requested.toFixed(6)} which exceeds maxPerCall cap of $${args.limit.toFixed(2)}.`
-                : `Tool call requires $${args.requested.toFixed(6)} which would bring total spend to $${((args.totalSpent ?? 0) + args.requested).toFixed(6)}, exceeding maxTotal cap of $${args.limit.toFixed(2)} (already spent $${(args.totalSpent ?? 0).toFixed(6)}).`
-        super(msg)
-        this.name = 'SpendingCapExceededError'
-        this.kind = args.kind
-        this.requested = args.requested
-        this.limit = args.limit
-        this.totalSpent = args.totalSpent
-    }
-}
-
-/** Thrown when a session challenge requests a deposit that exceeds maxSessionDeposit. */
-export class SessionDepositCapExceededError extends Error {
-    readonly suggested: number
-    readonly limit: number
-
-    constructor(args: { suggested: number; limit: number }) {
-        super(
-            `Server suggested a session deposit of $${args.suggested.toFixed(6)} but maxSessionDeposit is $${args.limit.toFixed(2)}. ` +
-            `Raise maxSessionDeposit or use a server with a smaller suggestedDeposit.`
-        )
-        this.name = 'SessionDepositCapExceededError'
-        this.suggested = args.suggested
-        this.limit = args.limit
-    }
-}
+// Re-export for backward compatibility — callers that did
+// `import { SpendingCapExceededError } from 'mpp-mcp-gateway/client'`
+// continue to work. The canonical source is now `./errors`.
+export { SessionDepositCapExceededError, SpendingCapExceededError }
 
 type ChallengeShape = {
     id: string
@@ -118,13 +86,13 @@ export class PaidMcpClient {
         this.maxSessionDeposit = parseFloat(config.maxSessionDeposit ?? '1.00')
 
         if (!(this.maxPerCall > 0)) {
-            throw new Error(`maxPerCall must be a positive number, got ${config.maxPerCall}`)
+            throw new ConfigurationError(`maxPerCall must be a positive number, got ${config.maxPerCall}`)
         }
         if (!(this.maxTotal > 0)) {
-            throw new Error(`maxTotal must be a positive number, got ${config.maxTotal}`)
+            throw new ConfigurationError(`maxTotal must be a positive number, got ${config.maxTotal}`)
         }
         if (!(this.maxSessionDeposit > 0)) {
-            throw new Error(
+            throw new ConfigurationError(
                 `maxSessionDeposit must be a positive number, got ${config.maxSessionDeposit}`
             )
         }

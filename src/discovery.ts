@@ -29,6 +29,7 @@
 import type { Express, Router, RequestHandler } from 'express'
 import { z } from 'zod'
 
+import { ValidationError } from './errors.js'
 import type { PaidMcpServer } from './server.js'
 import type { PricingModel } from './types.js'
 
@@ -285,7 +286,7 @@ function buildOffers(
 function usdToBaseUnits(amount: string, decimals: number): string {
     const n = Number(amount)
     if (!Number.isFinite(n) || n < 0) {
-        throw new Error(
+        throw new ValidationError(
             `Invalid amount "${amount}" — must be a non-negative decimal string.`
         )
     }

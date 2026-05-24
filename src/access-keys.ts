@@ -27,6 +27,7 @@
 
 import { randomBytes } from 'node:crypto'
 
+import { ConfigurationError, InternalError, ValidationError } from './errors.js'
 import type { MppMcpStore } from './stores/types.js'
 import type { PricingModel } from './types.js'
 
@@ -50,7 +51,7 @@ export interface AccessKeyRecord {
 export function parseDuration(input: string): number {
     const m = /^(\d+)\s*(s|m|h|d)$/.exec(input.trim())
     if (!m) {
-        throw new Error(
+        throw new ValidationError(
             `Invalid validFor duration "${input}". Expected forms like '60s', '15m', '4h', '7d'.`
         )
     }
@@ -61,7 +62,7 @@ export function parseDuration(input: string): number {
         case 'm': return n * 60_000
         case 'h': return n * 3_600_000
         case 'd': return n * 86_400_000
-        default: throw new Error(`unreachable unit ${unit}`)
+        default: throw new InternalError(`unreachable unit ${unit}`)
     }
 }
 
@@ -71,14 +72,14 @@ export function validateAccessKeyPricing(
     pricing: Extract<PricingModel, { type: 'access-key' }>
 ): void {
     if (pricing.validFor === undefined && pricing.maxCalls === undefined) {
-        throw new Error(
+        throw new ConfigurationError(
             `Tool "${toolName}" uses access-key pricing but specifies neither validFor nor maxCalls. ` +
             `At least one bound is required to prevent unbounded free access after a single payment.`
         )
     }
     if (pricing.validFor !== undefined) parseDuration(pricing.validFor) // validates format
     if (pricing.maxCalls !== undefined && !(Number.isInteger(pricing.maxCalls) && pricing.maxCalls > 0)) {
-        throw new Error(
+        throw new ConfigurationError(
             `Tool "${toolName}" has invalid maxCalls=${pricing.maxCalls}. Must be a positive integer.`
         )
     }

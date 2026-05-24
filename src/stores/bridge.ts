@@ -71,7 +71,7 @@ export function bridgeMppxStore(
                 current = await store.get<T>(key)
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Legacy store get (during update) failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -88,7 +88,7 @@ export function bridgeMppxStore(
                 return next
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Legacy store write (during update) failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })

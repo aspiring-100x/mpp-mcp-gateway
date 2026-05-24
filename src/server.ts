@@ -44,6 +44,7 @@ import {
     TEMPO_MAINNET,
     TEMPO_TESTNET,
 } from './constants.js'
+import { ConfigurationError, InternalError } from './errors.js'
 import {
     bridgeMppxStore,
     createMemoryStore,
@@ -313,7 +314,7 @@ export class PaidMcpServer {
         start: number
     ): Promise<unknown> {
         if (tool.pricing?.type !== 'session') {
-            throw new Error(
+            throw new InternalError(
                 `runSession called on tool with non-session pricing: ${tool.name}`
             )
         }
@@ -324,7 +325,7 @@ export class PaidMcpServer {
             } | { status: 402; challenge: unknown }>
         }).session
         if (!sessionFn) {
-            throw new Error(
+            throw new ConfigurationError(
                 `Session pricing requires escrowContract / store wiring. ` +
                 `If you intentionally use session pricing, ensure the server ` +
                 `was constructed with at least one session-priced tool so ` +
@@ -399,7 +400,7 @@ export class PaidMcpServer {
         start: number
     ): Promise<unknown> {
         if (tool.pricing?.type !== 'access-key') {
-            throw new Error(
+            throw new InternalError(
                 `runAccessKey called on tool with non-access-key pricing: ${tool.name}`
             )
         }

@@ -106,7 +106,7 @@ export function createCloudflareKvStore(
                 return parseValue<T>(raw)
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Cloudflare KV get failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -123,7 +123,7 @@ export function createCloudflareKvStore(
                 )
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Cloudflare KV put failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -135,7 +135,7 @@ export function createCloudflareKvStore(
                 await namespace.delete(fullKey(key))
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Cloudflare KV delete failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -157,7 +157,7 @@ export function createCloudflareKvStore(
                 raw = await namespace.get(k)
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Cloudflare KV get (during update) failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -179,7 +179,7 @@ export function createCloudflareKvStore(
                 return result
             } catch (err) {
                 throw new StoreError({
-                    code: 'backend-error',
+                    kind: 'backend-error',
                     message: `Cloudflare KV write (during update) failed for key "${key}": ${errMessage(err)}`,
                     cause: err,
                 })
@@ -208,7 +208,7 @@ function parseValue<T>(raw: string): T {
         return JSON.parse(raw) as T
     } catch (err) {
         throw new StoreError({
-            code: 'invalid-value',
+            kind: 'invalid-value',
             message: `Failed to parse KV value as JSON: ${errMessage(err)}`,
             cause: err,
         })
