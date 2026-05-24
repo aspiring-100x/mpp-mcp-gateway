@@ -29,6 +29,10 @@
         "./stores": {
             "types": "./dist/stores.d.ts",
             "import": "./dist/stores.js"
+        },
+        "./rate-limit": {
+            "types": "./dist/rate-limit.d.ts",
+            "import": "./dist/rate-limit.js"
         }
     },
     "scripts": {

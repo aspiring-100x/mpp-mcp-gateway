@@ -64,6 +64,7 @@ export {
     InternalError,
     isMppMcpError,
     MppMcpError,
+    RateLimitExceededError,
     ShutdownTimeoutError,
     ShuttingDownError,
     StoreError,
@@ -83,6 +84,16 @@ export {
     type Logger,
     type RedactionOptions,
 } from './logger.js'
+export {
+    noopLimiter,
+    tokenBucketLimiter,
+    upstashTokenBucketLimiter,
+    type RateLimitResult,
+    type RateLimiter,
+    type TokenBucketOptions,
+    type UpstashLimiterOptions,
+    type UpstashRedisLike as RateLimitRedisLike,
+} from './rate-limit.js'
 export {
     Store,
     bridgeMppxStore,

@@ -54,6 +54,8 @@ export type MppMcpErrorCode =
     | 'store-invalid-value'
     /** Optimistic-concurrency retry budget exhausted (Upstash-style backends). */
     | 'cas-exhausted'
+    /** A rate-limit budget is exhausted for the requested key. */
+    | 'rate-limited'
     /** A new call was rejected because the gateway is shutting down. */
     | 'shutting-down'
     /** Drain didn't finish before the configured timeout. */
@@ -231,6 +233,48 @@ export class SessionDepositCapExceededError extends MppMcpError {
         )
         this.suggested = args.suggested
         this.limit = args.limit
+    }
+}
+
+/**
+ * Thrown when a tool call exceeds the configured rate limit. The
+ * gateway refuses to issue a 402 challenge or run the tool until the
+ * bucket refills; clients should respect `retryAfterMs` before
+ * retrying. This protects servers from cheap-to-issue, expensive-to-
+ * fulfill request floods that don't require the attacker to pay.
+ */
+export class RateLimitExceededError extends MppMcpError {
+    readonly code = 'rate-limited' as const
+
+    /** Tool the rejected call targeted. */
+    readonly tool: string
+
+    /**
+     * Identifier of the rate-limit bucket that fired. By default
+     * this is the tool name; with a custom `keyExtractor` it can be
+     * a session id, client id, or arbitrary string.
+     */
+    readonly bucketKey: string
+
+    /**
+     * Suggested wait time before retrying, in milliseconds. Computed
+     * by the limiter from its refill rate. Honor this on the client
+     * to avoid spinning into deeper throttling.
+     */
+    readonly retryAfterMs: number
+
+    constructor(args: {
+        tool: string
+        bucketKey: string
+        retryAfterMs: number
+    }) {
+        super(
+            `Rate limit exceeded for "${args.tool}" (bucket: ${args.bucketKey}). ` +
+            `Retry after ${args.retryAfterMs}ms.`
+        )
+        this.tool = args.tool
+        this.bucketKey = args.bucketKey
+        this.retryAfterMs = args.retryAfterMs
     }
 }
 

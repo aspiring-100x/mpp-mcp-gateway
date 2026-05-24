@@ -8,6 +8,7 @@ export default defineConfig({
         dashboard: 'src/dashboard.ts',
         discovery: 'src/discovery.ts',
         stores: 'src/stores/index.ts',
+        'rate-limit': 'src/rate-limit.ts',
     },
     format: ['esm'],
     dts: true,

@@ -54,6 +54,11 @@ export async function makeConnectedPair(
         network: 'testnet',
         tools: opts.tools,
         logger: silentLogger(),
+        // Tests issue many tool calls in tight loops; the default
+        // limiter would throttle them. Disable by default — tests
+        // that explicitly want to exercise rate limiting can override
+        // via serverConfig.
+        rateLimit: { enabled: false },
         ...opts.serverConfig,
     })
 

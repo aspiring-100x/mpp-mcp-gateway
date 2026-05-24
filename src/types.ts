@@ -7,6 +7,7 @@
 import type { z } from 'zod'
 
 import type { Logger } from './logger.js'
+import type { RateLimiter } from './rate-limit.js'
 
 /** Pricing model for a paid MCP tool. */
 export type PricingModel =
@@ -188,6 +189,60 @@ export interface PaidMcpServerConfig {
      * but does not abort the shutdown.
      */
     onShutdown?: () => void | Promise<void>
+    /**
+     * Rate-limit configuration. By default the gateway throttles
+     * each tool to a sustained 60 requests/minute with a burst
+     * capacity of 60, scoped per-tool. This protects servers from
+     * cheap-to-issue, expensive-to-fulfill request floods that don't
+     * require the attacker to pay.
+     *
+     * Set `enabled: false` to disable rate limiting entirely
+     * (recommended only for tests and trusted environments). Pass a
+     * custom `limiter` to swap in `upstashTokenBucketLimiter` for
+     * multi-instance deployments. Provide `keyExtractor` to bucket
+     * by something other than tool name — e.g. session id on HTTP
+     * transports.
+     */
+    rateLimit?: {
+        /**
+         * Whether rate limiting runs at all. When `false`, every
+         * call is allowed regardless of other rate-limit settings.
+         * @default true
+         */
+        enabled?: boolean
+        /**
+         * Custom limiter implementation. When omitted, the gateway
+         * builds an in-memory token bucket using
+         * `refillPerMinute` and `capacity`.
+         */
+        limiter?: RateLimiter
+        /**
+         * Sustained refill rate, in tokens per minute, for the
+         * default in-memory limiter. Ignored when `limiter` is set.
+         * @default 60
+         */
+        refillPerMinute?: number
+        /**
+         * Burst capacity for the default in-memory limiter. Ignored
+         * when `limiter` is set.
+         * @default equals refillPerMinute
+         */
+        capacity?: number
+        /**
+         * Function that extracts the bucket key from the tool name
+         * and the MCP request `extra`. Default keys by tool name.
+         *
+         * For HTTP/SSE transports where session ids are useful,
+         * pass `(toolName, extra) => extra.sessionId ?? toolName`.
+         * Custom extractors can compose ids: e.g.
+         * `${toolName}:${sessionId}` for per-tool-per-session
+         * limits.
+         */
+        keyExtractor?: (
+            toolName: string,
+            extra: Record<string, unknown>
+        ) => string
+    }
 }
 
 /** Configuration for creating a payment-enabled MCP client. */

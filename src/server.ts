@@ -44,8 +44,13 @@ import {
     TEMPO_MAINNET,
     TEMPO_TESTNET,
 } from './constants.js'
-import { ConfigurationError, InternalError, ShutdownTimeoutError, ShuttingDownError } from './errors.js'
+import { ConfigurationError, InternalError, RateLimitExceededError, ShutdownTimeoutError, ShuttingDownError } from './errors.js'
 import { defaultLogger, type Logger } from './logger.js'
+import {
+    noopLimiter,
+    tokenBucketLimiter,
+    type RateLimiter,
+} from './rate-limit.js'
 import {
     bridgeMppxStore,
     createMemoryStore,
@@ -127,6 +132,17 @@ export class PaidMcpServer {
     private defaultDrainTimeoutMs: number
     /** Optional shutdown hook fired once when drain begins. */
     private onShutdown: (() => void | Promise<void>) | undefined
+    /** Rate limiter used to throttle 402 issuance. Always set after construction. */
+    private rateLimiter: RateLimiter
+    /**
+     * Function to derive the bucket key from `(toolName, extra)`.
+     * Default keys by tool name. Operators on HTTP/SSE transports
+     * typically swap this for a session-id-aware extractor.
+     */
+    private rateLimitKeyExtractor: (
+        toolName: string,
+        extra: Record<string, unknown>
+    ) => string
     /**
      * Fixed-size ring buffer of recent calls. Pre-allocated to
      * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
@@ -226,6 +242,23 @@ export class PaidMcpServer {
         this.closePromise = null
         this.defaultDrainTimeoutMs = config.drainTimeoutMs ?? 30_000
         this.onShutdown = config.onShutdown
+
+        // Resolve the rate limiter. Three cases mirror the store
+        // resolution: explicit limiter wins, then constructor-built
+        // token bucket, then noop when disabled.
+        const rl = config.rateLimit ?? {}
+        if (rl.enabled === false) {
+            this.rateLimiter = noopLimiter()
+        } else if (rl.limiter) {
+            this.rateLimiter = rl.limiter
+        } else {
+            this.rateLimiter = tokenBucketLimiter({
+                refillPerMinute: rl.refillPerMinute,
+                capacity: rl.capacity,
+            })
+        }
+        this.rateLimitKeyExtractor =
+            rl.keyExtractor ?? ((toolName) => toolName)
     }
 
     /**
@@ -246,6 +279,27 @@ export class PaidMcpServer {
             // gateway never issues a 402 it can't fulfill.
             if (this.shuttingDown) {
                 throw new ShuttingDownError({ tool: tool.name })
+            }
+
+            // Rate-limit gate: cap the rate at which we'll issue 402
+            // challenges or run handlers for this tool. Fires before
+            // the in-flight increment so denied calls never count
+            // against the drain budget. Limiter denials carry a
+            // suggested retry-after so well-behaved clients can back
+            // off without spinning into deeper throttling.
+            const bucketKey = this.rateLimitKeyExtractor(tool.name, extra)
+            const verdict = await this.rateLimiter.consume(bucketKey)
+            if (!verdict.allowed) {
+                this.logger.warn('rate limit exceeded', {
+                    tool: tool.name,
+                    bucketKey,
+                    retryAfterMs: verdict.retryAfterMs,
+                })
+                throw new RateLimitExceededError({
+                    tool: tool.name,
+                    bucketKey,
+                    retryAfterMs: verdict.retryAfterMs,
+                })
             }
 
             // In-flight tracking. Increment before any awaits so the
