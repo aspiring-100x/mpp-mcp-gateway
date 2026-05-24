@@ -32,6 +32,11 @@ import {
     type AccessKeyRecord,
 } from './access-keys.js'
 import {
+    REVENUE_DECIMALS,
+    baseUnitsToUsdString,
+    usdStringToBaseUnits,
+} from './amounts.js'
+import {
     ACCESS_KEY_META,
     DEFAULT_CURRENCY,
     TEMPO_ESCROW_MAINNET,
@@ -80,6 +85,15 @@ export class PaidMcpServer {
     private mcp: McpServer
     private tools: Map<string, PaidToolDefinition>
     private stats: GatewayStats
+    /**
+     * Internal revenue ledger in base units (BigInt). The string fields
+     * `stats.totalRevenue` and `stats.revenueByTool[tool]` are projected
+     * from these on every `getStats()` call. Doing arithmetic in BigInt
+     * keeps revenue exact across millions of additions; floats would
+     * accumulate drift after a few thousand sub-cent calls.
+     */
+    private totalRevenueUnits: bigint
+    private revenueUnitsByTool: Map<string, bigint>
     private startTime: number
     private accessKeyStore: Store.Store
     private callLog: CallLogEntry[]
@@ -124,6 +138,8 @@ export class PaidMcpServer {
         }
 
         this.startTime = Date.now()
+        this.totalRevenueUnits = 0n
+        this.revenueUnitsByTool = new Map()
         this.stats = {
             totalCalls: 0,
             paidCalls: 0,
@@ -440,12 +456,23 @@ export class PaidMcpServer {
         if (isSession) this.stats.sessionCalls++
         const calls = this.stats.callsByTool[toolName] ?? 0
         this.stats.callsByTool[toolName] = calls + 1
-        const prev = parseFloat(this.stats.revenueByTool[toolName] ?? '0')
-        const next = prev + parseFloat(amount)
-        this.stats.revenueByTool[toolName] = next.toFixed(6)
-        this.stats.totalRevenue = (
-            parseFloat(this.stats.totalRevenue) + parseFloat(amount)
-        ).toFixed(6)
+
+        // Accumulate revenue in base units (BigInt) for exactness, then
+        // project the decimal-string view used by the public stats shape.
+        const units = usdStringToBaseUnits(amount, REVENUE_DECIMALS)
+        const prevToolUnits = this.revenueUnitsByTool.get(toolName) ?? 0n
+        const nextToolUnits = prevToolUnits + units
+        this.revenueUnitsByTool.set(toolName, nextToolUnits)
+        this.totalRevenueUnits += units
+
+        this.stats.revenueByTool[toolName] = baseUnitsToUsdString(
+            nextToolUnits,
+            REVENUE_DECIMALS
+        )
+        this.stats.totalRevenue = baseUnitsToUsdString(
+            this.totalRevenueUnits,
+            REVENUE_DECIMALS
+        )
     }
 
     /** @internal Append an entry to the bounded call log. */
