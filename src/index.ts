@@ -59,6 +59,21 @@ export {
     type DiscoveryOptions,
     type ServiceCategory,
 } from './discovery.js'
+export {
+    Store,
+    StoreError,
+    bridgeMppxStore,
+    createCloudflareKvStore,
+    createMemoryStore,
+    createUpstashStore,
+    isMppMcpStore,
+    type CloudflareKvLike,
+    type CloudflareKvStoreOptions,
+    type LegacyThreeMethodStore,
+    type MppMcpStore,
+    type UpstashRedisLike,
+    type UpstashStoreOptions,
+} from './stores/index.js'
 export * from './constants.js'
 export type {
     CallLogEntry,

@@ -25,6 +25,10 @@
         "./discovery": {
             "types": "./dist/discovery.d.ts",
             "import": "./dist/discovery.js"
+        },
+        "./stores": {
+            "types": "./dist/stores.d.ts",
+            "import": "./dist/stores.js"
         }
     },
     "scripts": {
@@ -67,9 +71,17 @@
         "zod": "^4.4.3"
     },
     "peerDependencies": {
+        "@cloudflare/workers-types": "*",
+        "@upstash/redis": "^1.0.0",
         "express": ">=5"
     },
     "peerDependenciesMeta": {
+        "@cloudflare/workers-types": {
+            "optional": true
+        },
+        "@upstash/redis": {
+            "optional": true
+        },
         "express": {
             "optional": true
         }

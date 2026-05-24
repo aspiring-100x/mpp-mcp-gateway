@@ -7,6 +7,7 @@ export default defineConfig({
         client: 'src/client.ts',
         dashboard: 'src/dashboard.ts',
         discovery: 'src/discovery.ts',
+        stores: 'src/stores/index.ts',
     },
     format: ['esm'],
     dts: true,

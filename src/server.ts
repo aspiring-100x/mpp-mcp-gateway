@@ -19,7 +19,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { Mppx, Store, tempo, Transport } from 'mppx/server'
+import { Mppx, tempo, Transport } from 'mppx/server'
 import { privateKeyToAccount } from 'viem/accounts'
 import type { z } from 'zod'
 
@@ -44,6 +44,12 @@ import {
     TEMPO_MAINNET,
     TEMPO_TESTNET,
 } from './constants.js'
+import {
+    bridgeMppxStore,
+    createMemoryStore,
+    isMppMcpStore,
+    type MppMcpStore,
+} from './stores/index.js'
 import type {
     CallLogEntry,
     GatewayStats,
@@ -95,7 +101,7 @@ export class PaidMcpServer {
     private totalRevenueUnits: bigint
     private revenueUnitsByTool: Map<string, bigint>
     private startTime: number
-    private accessKeyStore: Store.Store
+    private accessKeyStore: MppMcpStore
     /**
      * Fixed-size ring buffer of recent calls. Pre-allocated to
      * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
@@ -126,8 +132,12 @@ export class PaidMcpServer {
             }
         }
 
-        this.accessKeyStore =
-            (config.accessKeyStore as Store.Store | undefined) ?? Store.memory()
+        // Resolve the access-key store. Three cases:
+        //   1. User passed a four-method MppMcpStore → use directly.
+        //   2. User passed a legacy three-method store → bridge it
+        //      (best-effort `update`, with a one-shot warning).
+        //   3. Nothing passed → in-memory default with atomic update.
+        this.accessKeyStore = resolveStore(config.accessKeyStore)
 
         this.callLogCapacity = Math.max(0, config.callLogSize ?? 1000)
         // Pre-allocate the ring buffer so `appendCall` never has to grow
@@ -632,7 +642,12 @@ function createMppxPayment(
         const escrow =
             config.escrowContract ??
             (config.network === 'mainnet' ? TEMPO_ESCROW_MAINNET : TEMPO_ESCROW_TESTNET)
-        const store = (config.sessionStore as Store.Store | undefined) ?? Store.memory()
+        // Resolve the session store using the same logic as the
+        // access-key store: native MppMcpStore → use directly, legacy
+        // three-method → bridge, nothing → in-memory default. mppx
+        // only consumes get/put/delete from the store, so any of the
+        // three forms is structurally compatible.
+        const store = resolveStore(config.sessionStore)
 
             ; (tempoParams as Record<string, unknown>).escrowContract = escrow
             ; (tempoParams as Record<string, unknown>).store = store
@@ -648,6 +663,21 @@ function createMppxPayment(
         secretKey: config.secretKey,
         transport: Transport.mcpSdk(),
     })
+}
+
+/**
+ * @internal Resolve a user-supplied store config (or `undefined`) to a
+ * native {@link MppMcpStore}. Three cases:
+ *
+ *   1. `undefined` → fresh in-memory store with atomic update.
+ *   2. Already an `MppMcpStore` (has `update`) → use directly.
+ *   3. Legacy three-method store (mppx's older `Store.Store`) → bridge
+ *      with a best-effort `update` shim (logs a one-shot warning).
+ */
+function resolveStore(input: unknown): MppMcpStore {
+    if (input === undefined || input === null) return createMemoryStore()
+    if (isMppMcpStore(input)) return input
+    return bridgeMppxStore(input as Parameters<typeof bridgeMppxStore>[0])
 }
 
 /** @internal Normalize a handler result into the MCP CallToolResult shape. */

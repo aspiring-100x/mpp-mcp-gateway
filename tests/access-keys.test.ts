@@ -22,7 +22,7 @@ import {
     validateAccessKeyPricing,
 } from '../src/access-keys.js'
 import { createPaidMcpServer } from '../src/server.js'
-import { Store } from 'mppx/server'
+import { createMemoryStore } from '../src/stores/index.js'
 import { makeConnectedPair } from './helpers.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
@@ -176,13 +176,13 @@ describe('issueRecord', () => {
 
 describe('redeem', () => {
     it('returns unknown for an unrecognized key', async () => {
-        const store = Store.memory()
+        const store = createMemoryStore()
         const out = await redeem(store, 'mppmcp_does_not_exist', 'tool-x')
         expect(out).toEqual({ ok: false, reason: 'unknown' })
     })
 
     it('returns wrong-tool when the key is for another tool', async () => {
-        const store = Store.memory()
+        const store = createMemoryStore()
         const r = issueRecord({
             toolName: 'right-tool',
             pricing: { type: 'access-key', amount: '1', maxCalls: 5 },
@@ -193,7 +193,7 @@ describe('redeem', () => {
     })
 
     it('decrements remainingCalls on each successful redeem', async () => {
-        const store = Store.memory()
+        const store = createMemoryStore()
         const r = issueRecord({
             toolName: 't',
             pricing: { type: 'access-key', amount: '1', maxCalls: 3 },
@@ -213,8 +213,8 @@ describe('redeem', () => {
         expect(d).toEqual({ ok: false, reason: 'exhausted' })
     })
 
-    it('returns expired and deletes the key when validFor has passed', async () => {
-        const store = Store.memory()
+    it('returns expired without deleting the key (sticky terminal state)', async () => {
+        const store = createMemoryStore()
         const r = issueRecord({
             toolName: 't',
             pricing: { type: 'access-key', amount: '1', validFor: '60s' },
@@ -225,12 +225,13 @@ describe('redeem', () => {
 
         const out = await redeem(store, expired.key, 't')
         expect(out).toEqual({ ok: false, reason: 'expired' })
-        // And the store no longer carries it.
-        expect(await store.get(expired.key)).toBeNull()
+        // Sticky: record remains so concurrent redeems all observe
+        // the same `expired` reason. TTL on the backend evicts it.
+        expect(await store.get(expired.key)).not.toBeNull()
     })
 
     it('allows unlimited time-bounded redemptions', async () => {
-        const store = Store.memory()
+        const store = createMemoryStore()
         const r = issueRecord({
             toolName: 't',
             pricing: { type: 'access-key', amount: '1', validFor: '1h' },

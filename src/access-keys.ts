@@ -13,13 +13,21 @@
  * Wire format on subsequent calls:
  *   - Client request `_meta[ACCESS_KEY_META] = key` — just the opaque string
  *
- * Storage uses the same `Store.Store` interface mppx uses for sessions so
- * users can swap in Redis/D1/Durable Objects without writing a new adapter.
+ * Storage uses {@link MppMcpStore}, a small four-method interface with
+ * three native adapters (memory, Upstash, Cloudflare KV) and a bridge
+ * for legacy three-method stores. See `src/stores/` for details.
+ *
+ * Concurrency: `redeem` performs the counter decrement via the store's
+ * atomic `update` primitive. With the in-memory or Upstash adapters
+ * this guarantees that 50 concurrent redeems of a 50-call key result
+ * in exactly 50 successes and the rest fail with `exhausted` — no
+ * lost-update races. The Cloudflare KV adapter cannot enforce this
+ * across regions; see its module docstring for the trade-off.
  */
 
 import { randomBytes } from 'node:crypto'
-import { Store } from 'mppx/server'
 
+import type { MppMcpStore } from './stores/types.js'
 import type { PricingModel } from './types.js'
 
 /** Persistent record for an issued access key. */
@@ -105,45 +113,85 @@ export type RedeemResult =
     | { ok: false; reason: 'unknown' | 'wrong-tool' | 'expired' | 'exhausted' }
 
 /**
- * Atomically redeem one call against an access key. On success returns the
- * updated record; on failure returns a typed reason so the caller can decide
- * whether to fall back to the pay flow.
+ * Atomically redeem one call against an access key. On success returns
+ * the updated record; on failure returns a typed reason so the caller
+ * can decide whether to fall back to the pay flow.
+ *
+ * Atomicity: the entire read-validate-decrement-write cycle runs
+ * inside the store's `update` primitive. Concurrent redeems of the
+ * same key serialize cleanly — exactly `remainingCalls` of them
+ * succeed (modulo backend consistency; see store-specific docs).
+ *
+ * Sticky terminal states: `redeem` does NOT delete records on
+ * `expired` or `exhausted`. Removing them would create a race where
+ * concurrent redeems see one as the terminal reason and the next as
+ * `unknown` (record absent because someone else just deleted it).
+ * Instead, terminal records sit in the store and consistently return
+ * the same reason for every observer. Backends with TTL support
+ * (Upstash, Cloudflare KV) clean them up automatically; in-memory
+ * stores accumulate them until process restart, which is fine for
+ * realistic working set sizes.
+ *
+ * To preserve the typed reason while still using `update`, we use a
+ * captured-outcome pattern: the transform writes its decision into a
+ * closure variable on each invocation, and only the LAST invocation's
+ * decision corresponds to the value that actually got persisted. On
+ * the in-memory adapter the transform runs exactly once. On Upstash
+ * with concurrent contention the transform may run multiple times.
  */
 export async function redeem(
-    store: Store.Store,
+    store: MppMcpStore,
     key: string,
     toolName: string
 ): Promise<RedeemResult> {
-    const record = await store.get<AccessKeyRecord>(key)
-    if (!record) return { ok: false, reason: 'unknown' }
-    if (record.tool !== toolName) return { ok: false, reason: 'wrong-tool' }
+    /**
+     * The transform's chosen outcome. Captured in this variable so the
+     * caller (this function) can return it after `update` resolves. We
+     * reset it to a sentinel before each redeem so a failure mode
+     * isn't accidentally inherited from a previous call.
+     */
+    let outcome: RedeemResult = { ok: false, reason: 'unknown' }
 
-    // Time check
-    if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
-        await store.delete(key)
-        return { ok: false, reason: 'expired' }
-    }
-
-    // Count check
-    if (record.remainingCalls !== null) {
-        if (record.remainingCalls <= 0) {
-            await store.delete(key)
-            return { ok: false, reason: 'exhausted' }
+    await store.update<AccessKeyRecord>(key, (record) => {
+        if (!record) {
+            outcome = { ok: false, reason: 'unknown' }
+            return null // nothing to write; key remains absent
         }
-        const next: AccessKeyRecord = { ...record, remainingCalls: record.remainingCalls - 1 }
-        await store.put(key, next)
-        // Auto-revoke when the *next* call would have nothing left to give.
-        // (We just decremented to >= 0; keep the record around so a final
-        // call can still see remainingCalls === 0 in its receipt.)
-        return { ok: true, record: next }
-    }
 
-    return { ok: true, record }
+        if (record.tool !== toolName) {
+            outcome = { ok: false, reason: 'wrong-tool' }
+            return record // leave the record untouched
+        }
+
+        if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
+            outcome = { ok: false, reason: 'expired' }
+            return record // sticky: keep the record, every observer sees 'expired'
+        }
+
+        if (record.remainingCalls !== null) {
+            if (record.remainingCalls <= 0) {
+                outcome = { ok: false, reason: 'exhausted' }
+                return record // sticky: keep the record, every observer sees 'exhausted'
+            }
+            const next: AccessKeyRecord = {
+                ...record,
+                remainingCalls: record.remainingCalls - 1,
+            }
+            outcome = { ok: true, record: next }
+            return next
+        }
+
+        // Unlimited-calls record: count not decremented, record unchanged.
+        outcome = { ok: true, record }
+        return record
+    })
+
+    return outcome
 }
 
 /** Persist a freshly issued record. */
 export async function storeRecord(
-    store: Store.Store,
+    store: MppMcpStore,
     record: AccessKeyRecord
 ): Promise<void> {
     await store.put(record.key, record)
