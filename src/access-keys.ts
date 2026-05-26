@@ -25,9 +25,8 @@
  * across regions; see its module docstring for the trade-off.
  */
 
-import { randomBytes } from 'node:crypto'
-
 import { ConfigurationError, InternalError, ValidationError } from './errors.js'
+import { randomHex } from './runtime.js'
 import type { MppMcpStore } from './stores/types.js'
 import type { PricingModel } from './types.js'
 
@@ -93,7 +92,9 @@ export function issueRecord(args: {
 }): AccessKeyRecord {
     const now = Date.now()
     // 32 bytes of crypto randomness — keys look like `mppmcp_<hex>`.
-    const key = `mppmcp_${randomBytes(32).toString('hex')}`
+    // Uses Web Crypto via the runtime adapter so this works in Node,
+    // Workers, Edge, Deno, and Bun without modification.
+    const key = `mppmcp_${randomHex(32)}`
     const expiresAt = args.pricing.validFor
         ? new Date(now + parseDuration(args.pricing.validFor)).toISOString()
         : null

@@ -50,6 +50,7 @@
  */
 
 import { isMppMcpError, type MppMcpError } from './errors.js'
+import { writeLogLine } from './runtime.js'
 
 /** Severity level. Filters control which entries actually emit. */
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -113,8 +114,11 @@ export interface ConsoleLoggerOptions {
     pretty?: boolean
 
     /**
-     * Sink to write entries to. Defaults to a function that writes to
-     * `process.stderr`. Override in tests or to redirect to a file.
+     * Sink to write entries to. Defaults to a runtime-aware writer
+     * that targets `process.stderr` on Node and `console.error` on
+     * edge runtimes (Workers, Vercel Edge, Deno, Bun). Override in
+     * tests or to redirect to a file, network sink, or in-memory
+     * buffer.
      */
     write?: (line: string) => void
 
@@ -134,14 +138,12 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
 }
 
 function defaultWrite(line: string): void {
-    // Use process.stderr.write directly to avoid console.error's
-    // platform-specific newline handling and to keep the output clean
-    // for log aggregators. process is typed against @types/node so
-    // this is safe in Node.js targets; edge runtimes that lack
-    // process.stderr will surface a TypeError on first write — at
-    // which point the operator should configure their own `write`
-    // callback or a different logger.
-    process.stderr.write(line + '\n')
+    // Delegate to the runtime adapter so this default works on Node
+    // (writes to fd 2 via process.stderr.write), Cloudflare Workers,
+    // Vercel Edge, Deno Deploy, and Bun (writes via console.error).
+    // Operators who want a different sink — file, network, in-memory
+    // buffer — pass `write` in `ConsoleLoggerOptions`.
+    writeLogLine(line)
 }
 
 /**
