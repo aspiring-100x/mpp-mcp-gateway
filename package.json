@@ -33,6 +33,10 @@
         "./rate-limit": {
             "types": "./dist/rate-limit.d.ts",
             "import": "./dist/rate-limit.js"
+        },
+        "./auth": {
+            "types": "./dist/auth.d.ts",
+            "import": "./dist/auth.js"
         }
     },
     "scripts": {

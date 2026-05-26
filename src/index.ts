@@ -60,6 +60,19 @@ export {
     type ServiceCategory,
 } from './discovery.js'
 export {
+    apiKey,
+    auth,
+    basicAuth,
+    bearerToken,
+    publicCors,
+    signedQuery,
+    type ApiKeyOptions,
+    type BasicAuthOptions,
+    type BearerTokenOptions,
+    type PublicCorsOptions,
+    type SignedQueryOptions,
+} from './auth.js'
+export {
     ConfigurationError,
     InternalError,
     isMppMcpError,

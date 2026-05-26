@@ -9,6 +9,7 @@ export default defineConfig({
         discovery: 'src/discovery.ts',
         stores: 'src/stores/index.ts',
         'rate-limit': 'src/rate-limit.ts',
+        auth: 'src/auth.ts',
     },
     format: ['esm'],
     dts: true,
