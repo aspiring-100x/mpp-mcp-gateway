@@ -37,6 +37,10 @@
         "./auth": {
             "types": "./dist/auth.d.ts",
             "import": "./dist/auth.js"
+        },
+        "./metrics": {
+            "types": "./dist/metrics.d.ts",
+            "import": "./dist/metrics.js"
         }
     },
     "scripts": {

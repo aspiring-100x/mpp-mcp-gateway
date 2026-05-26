@@ -60,6 +60,12 @@ export {
     type ServiceCategory,
 } from './discovery.js'
 export {
+    formatMetrics,
+    mountMetrics,
+    PROMETHEUS_CONTENT_TYPE,
+    type MetricsOptions,
+} from './metrics.js'
+export {
     apiKey,
     auth,
     basicAuth,
