@@ -4,6 +4,7 @@
  * Core types for monetizing MCP tools with MPP micropayments on Tempo.
  */
 
+import type { Tracer } from '@opentelemetry/api'
 import type { z } from 'zod'
 
 import type { Logger } from './logger.js'
@@ -243,6 +244,29 @@ export interface PaidMcpServerConfig {
             extra: Record<string, unknown>
         ) => string
     }
+    /**
+     * Optional OpenTelemetry tracer. When provided, the gateway
+     * emits a span tree for every paid-tool call: a root
+     * `mppmcp.tool.call` span with child spans for rate-limit,
+     * payment, access-key redemption / issuance, session advance,
+     * and handler execution. Span attributes carry tool name,
+     * pricing type, payment mode, and (when applicable) tx hash.
+     *
+     * Tracing is **off by default** — only paid calls in
+     * production deployments typically warrant the cost. Construct
+     * a tracer through your OTel SDK setup and pass it here:
+     *
+     * ```ts
+     * import { trace } from '@opentelemetry/api'
+     * tracer: trace.getTracer('mpp-mcp-gateway')
+     * ```
+     *
+     * The library imports `@opentelemetry/api` only as a type;
+     * users opt in by installing it themselves. With no tracer
+     * configured, every tracing helper is a synchronous no-op so
+     * non-traced deployments pay zero cost.
+     */
+    tracer?: Tracer
 }
 
 /** Configuration for creating a payment-enabled MCP client. */

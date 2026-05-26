@@ -72,8 +72,11 @@ describe('tokenBucketLimiter — math', () => {
     })
 
     it('refills tokens over time', async () => {
+        // Use a slow refill rate so the test doesn't race against
+        // event-loop scheduling. 60/min = 1 token/sec → in the few
+        // millis between drain and check, basically no refill happens.
         const limiter = tokenBucketLimiter({
-            refillPerMinute: 60_000, // 1000/sec → 1/ms
+            refillPerMinute: 60,
             capacity: 2,
         })
 
@@ -83,8 +86,8 @@ describe('tokenBucketLimiter — math', () => {
         const drained = await limiter.consume('k')
         expect(drained.allowed).toBe(false)
 
-        // Wait long enough for at least 1 token to refill.
-        await sleep(20)
+        // Wait long enough for at least 1 token to refill at 1/sec.
+        await sleep(1100)
         const afterRefill = await limiter.consume('k')
         expect(afterRefill.allowed).toBe(true)
     })

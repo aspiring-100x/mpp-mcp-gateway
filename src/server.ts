@@ -57,6 +57,12 @@ import {
     isMppMcpStore,
     type MppMcpStore,
 } from './stores/index.js'
+import {
+    startSpan,
+    TRACE_ATTRS,
+    TRACE_SPANS,
+    type ActiveSpan,
+} from './tracing.js'
 import type {
     CallLogEntry,
     GatewayStats,
@@ -65,6 +71,7 @@ import type {
     PricingModel,
     ToolHandlerResult,
 } from './types.js'
+import type { Tracer } from '@opentelemetry/api'
 
 /** Compute the current price for a tool based on its pricing model and call count. */
 function priceFor(pricing: PricingModel | undefined, calls: number): string | null {
@@ -143,6 +150,12 @@ export class PaidMcpServer {
         toolName: string,
         extra: Record<string, unknown>
     ) => string
+    /**
+     * Optional OpenTelemetry tracer. `undefined` when tracing is
+     * not configured — every tracing helper short-circuits in that
+     * case so non-traced deployments pay zero cost.
+     */
+    private tracer: Tracer | undefined
     /**
      * Fixed-size ring buffer of recent calls. Pre-allocated to
      * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
@@ -259,6 +272,7 @@ export class PaidMcpServer {
         }
         this.rateLimitKeyExtractor =
             rl.keyExtractor ?? ((toolName) => toolName)
+        this.tracer = config.tracer
     }
 
     /**
@@ -307,9 +321,40 @@ export class PaidMcpServer {
             // unit. The `try/finally` guarantees decrement on every
             // return path (success, thrown error, 402 challenge).
             this.inFlight++
+            // Root span for this tool call. Lives across rate-limit,
+            // payment, handler, and result phases. Attributes are
+            // populated as the call progresses; status is set in
+            // the finally block based on whether the handler threw.
+            const rootSpan = startSpan(this.tracer, TRACE_SPANS.TOOL_CALL, {
+                [TRACE_ATTRS.TOOL_NAME]: tool.name,
+                [TRACE_ATTRS.PRICING_TYPE]: tool.pricing?.type ?? 'free',
+            })
             try {
-                return await this.runWrappedHandler(tool, args, extra, currency, recipient)
+                const result = await this.runWrappedHandler(
+                    tool,
+                    args,
+                    extra,
+                    currency,
+                    recipient,
+                    rootSpan
+                )
+                rootSpan.setOk()
+                return result
+            } catch (err) {
+                // 402 challenges aren't real failures — they're
+                // control flow signaling "agent should pay and
+                // retry". Mark the span OK with a hint attribute
+                // rather than ERROR so traces don't look alarming
+                // in dashboards.
+                if (isPaymentRequired(err)) {
+                    rootSpan.setAttribute('mppmcp.outcome', 'payment-required')
+                    rootSpan.setOk()
+                } else {
+                    rootSpan.setError(err)
+                }
+                throw err
             } finally {
+                rootSpan.end()
                 this.inFlight--
             }
         }
@@ -336,7 +381,8 @@ export class PaidMcpServer {
             _meta?: Record<string, unknown>
         },
         currency: `0x${string}`,
-        recipient: `0x${string}`
+        recipient: `0x${string}`,
+        rootSpan: ActiveSpan
     ): Promise<unknown> {
         const start = Date.now()
         const currentCalls = this.stats.callsByTool[tool.name] ?? 0
@@ -347,7 +393,8 @@ export class PaidMcpServer {
                 this.stats.totalCalls++
                 this.stats.freeCalls++
                 this.stats.callsByTool[tool.name] = currentCalls + 1
-                const result = await tool.handler(args)
+                rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_MODE, 'free')
+                const result = await this.runUserHandler(tool, args)
                 this.appendCall({
                     tool: tool.name,
                     timestamp: new Date().toISOString(),
@@ -360,27 +407,48 @@ export class PaidMcpServer {
 
             // Access-key path: try to redeem first, fall through to payment.
             if (tool.pricing.type === 'access-key') {
-                return await this.runAccessKey(tool, args, extra, start)
+                return await this.runAccessKey(tool, args, extra, start, rootSpan)
             }
 
             // Paid path — choose the right intent.
             if (tool.pricing.type === 'session') {
-                return await this.runSession(tool, args, extra, start)
+                return await this.runSession(tool, args, extra, start, rootSpan)
             }
 
             // per-call / tiered → charge intent
             const amount = priceFor(tool.pricing, currentCalls)!
-            const charge = this.mppx.charge({
-                amount,
-                currency,
-                recipient,
-                description: tool.description,
+            rootSpan.setAttribute(TRACE_ATTRS.AMOUNT, amount)
+            rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_MODE, tool.pricing.type)
+
+            // Wrap mppx.charge in a child span so the on-chain
+            // settle latency shows up distinctly from handler time.
+            const chargeSpan = startSpan(this.tracer, TRACE_SPANS.PAYMENT_CHARGE, {
+                [TRACE_ATTRS.TOOL_NAME]: tool.name,
+                [TRACE_ATTRS.AMOUNT]: amount,
             })
+            let outcome: Awaited<ReturnType<ReturnType<typeof this.mppx.charge>>>
+            try {
+                const charge = this.mppx.charge({
+                    amount,
+                    currency,
+                    recipient,
+                    description: tool.description,
+                })
+                outcome = await charge(extra)
+                if (outcome.status === 402) {
+                    chargeSpan.setAttribute('mppmcp.outcome', 'payment-required')
+                    chargeSpan.setOk()
+                    throw outcome.challenge
+                }
+                chargeSpan.setOk()
+            } catch (err) {
+                if (!isPaymentRequired(err)) chargeSpan.setError(err)
+                throw err
+            } finally {
+                chargeSpan.end()
+            }
 
-            const outcome = await charge(extra)
-            if (outcome.status === 402) throw outcome.challenge
-
-            const result = await tool.handler(args)
+            const result = await this.runUserHandler(tool, args)
             this.recordPaidCall(tool.name, amount)
             this.appendCall({
                 tool: tool.name,
@@ -390,7 +458,15 @@ export class PaidMcpServer {
                 paymentMode: tool.pricing.type, // 'per-call' | 'tiered'
                 amount,
             })
-            return outcome.withReceipt(toMcpResult(result))
+            // Attach the tx hash to the root span if the receipt
+            // surfaced one. mppx wraps the return; we sniff at the
+            // structuredContent / _meta level after the wrap.
+            const wrapped = outcome.withReceipt(toMcpResult(result))
+            const receipt = readReceipt(wrapped)
+            if (receipt?.reference) {
+                rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_TX_HASH, receipt.reference)
+            }
+            return wrapped
         } catch (err) {
             // 402 challenges flow through the catch but they aren't real
             // failures — they're control-flow signals to the client. We
@@ -422,6 +498,31 @@ export class PaidMcpServer {
     }
 
     /**
+     * @internal Run the user's handler inside a `mppmcp.handler.run`
+     * child span. Centralized so every pricing path produces the
+     * same span name — operators can filter dashboards by it without
+     * caring about which path the call took.
+     */
+    private async runUserHandler(
+        tool: PaidToolDefinition,
+        args: Record<string, unknown>
+    ): Promise<ToolHandlerResult> {
+        const span = startSpan(this.tracer, TRACE_SPANS.HANDLER_RUN, {
+            [TRACE_ATTRS.TOOL_NAME]: tool.name,
+        })
+        try {
+            const result = await tool.handler(args)
+            span.setOk()
+            return result
+        } catch (err) {
+            span.setError(err)
+            throw err
+        } finally {
+            span.end()
+        }
+    }
+
+    /**
      * Run a session-priced tool. The first call opens an on-chain escrow
      * channel (the client signs the open tx); subsequent calls supply
      * incremental signed vouchers that the server validates and stores.
@@ -436,7 +537,8 @@ export class PaidMcpServer {
         extra: Record<string, unknown> & {
             _meta?: Record<string, unknown>
         },
-        start: number
+        start: number,
+        rootSpan: ActiveSpan
     ): Promise<unknown> {
         if (tool.pricing?.type !== 'session') {
             throw new InternalError(
@@ -458,6 +560,17 @@ export class PaidMcpServer {
             )
         }
 
+        rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_MODE, 'session')
+        rootSpan.setAttribute(TRACE_ATTRS.AMOUNT, tool.pricing.amount)
+
+        // Wrap the channel-advance step in a child span. This phase
+        // covers challenge issuance, voucher validation, and channel
+        // mutation — when latency spikes, this is usually where.
+        const advanceSpan = startSpan(this.tracer, TRACE_SPANS.SESSION_ADVANCE, {
+            [TRACE_ATTRS.TOOL_NAME]: tool.name,
+            [TRACE_ATTRS.AMOUNT]: tool.pricing.amount,
+        })
+
         const session = sessionFn({
             amount: tool.pricing.amount,
             unitType: tool.pricing.unitType,
@@ -469,27 +582,42 @@ export class PaidMcpServer {
             }),
         })
 
-        const outcome = await session(extra)
-        if (outcome.status === 402) throw outcome.challenge
+        let outcome: Awaited<ReturnType<ReturnType<typeof sessionFn>>>
+        try {
+            outcome = await session(extra)
+            if (outcome.status === 402) {
+                advanceSpan.setAttribute('mppmcp.outcome', 'payment-required')
+                advanceSpan.setOk()
+                throw outcome.challenge
+            }
+            advanceSpan.setOk()
+        } catch (err) {
+            if (!isPaymentRequired(err)) advanceSpan.setError(err)
+            throw err
+        } finally {
+            advanceSpan.end()
+        }
 
-        const result = await tool.handler(args)
+        const result = await this.runUserHandler(tool, args)
 
         // Inspect the inbound credential to understand what just happened on
         // the channel — open / topUp / voucher / close — and update stats.
         // The mcp-sdk server transport places the already-deserialized
         // Credential object at extra._meta[credentialMetaKey], so we read
         // it directly rather than re-deserializing.
+        let action: string | undefined
         try {
             const cred = (extra._meta as Record<string, unknown> | undefined)?.[
                 'org.paymentauth/credential'
             ] as { payload?: { action?: string } } | undefined
-            const action = cred?.payload?.action
+            action = cred?.payload?.action
             if (action === 'open') this.stats.sessionsOpened++
             if (action === 'close') this.stats.sessionsClosed++
         } catch {
             // Stats are best-effort. A malformed credential would have been
             // rejected by mppx.session() before we got here.
         }
+        if (action) rootSpan.setAttribute(TRACE_ATTRS.SESSION_ACTION, action)
 
         this.recordPaidCall(tool.name, tool.pricing.amount, true)
         this.appendCall({
@@ -500,7 +628,12 @@ export class PaidMcpServer {
             paymentMode: 'session',
             amount: tool.pricing.amount,
         })
-        return outcome.withReceipt(toMcpResult(result))
+        const wrapped = outcome.withReceipt(toMcpResult(result))
+        const receipt = readReceipt(wrapped)
+        if (receipt?.reference) {
+            rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_TX_HASH, receipt.reference)
+        }
+        return wrapped
     }
 
     /**
@@ -522,7 +655,8 @@ export class PaidMcpServer {
         extra: Record<string, unknown> & {
             _meta?: Record<string, unknown>
         },
-        start: number
+        start: number,
+        rootSpan: ActiveSpan
     ): Promise<unknown> {
         if (tool.pricing?.type !== 'access-key') {
             throw new InternalError(
@@ -535,10 +669,31 @@ export class PaidMcpServer {
         ]
 
         if (typeof incomingKey === 'string' && incomingKey.length > 0) {
-            const outcome = await redeem(this.accessKeyStore, incomingKey, tool.name)
+            // Redeem in a child span so dashboards can isolate cache-hit
+            // latency (typically sub-ms) from the pay-and-issue path.
+            const redeemSpan = startSpan(
+                this.tracer,
+                TRACE_SPANS.ACCESS_KEY_REDEEM,
+                { [TRACE_ATTRS.TOOL_NAME]: tool.name }
+            )
+            let outcome: Awaited<ReturnType<typeof redeem>>
+            try {
+                outcome = await redeem(this.accessKeyStore, incomingKey, tool.name)
+                redeemSpan.setAttribute(
+                    'mppmcp.access-key.outcome',
+                    outcome.ok ? 'ok' : outcome.reason
+                )
+                redeemSpan.setOk()
+            } catch (err) {
+                redeemSpan.setError(err)
+                throw err
+            } finally {
+                redeemSpan.end()
+            }
             if (outcome.ok) {
                 // Free call against a valid key.
-                const result = await tool.handler(args)
+                rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_MODE, 'access-key-cached')
+                const result = await this.runUserHandler(tool, args)
                 this.stats.totalCalls++
                 this.stats.accessKeyCalls++
                 const calls = this.stats.callsByTool[tool.name] ?? 0
@@ -560,24 +715,44 @@ export class PaidMcpServer {
         }
 
         // No key (or rejected). Charge the upfront fee.
-        const charge = this.mppx.charge({
-            amount: pricing.amount,
-            currency: this.config.currency,
-            recipient: this.config.recipient,
-            description: `${tool.description} (issues access key)`,
-        })
+        rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_MODE, 'access-key')
+        rootSpan.setAttribute(TRACE_ATTRS.AMOUNT, pricing.amount)
 
-        const outcome = await charge(extra)
-        if (outcome.status === 402) throw outcome.challenge
+        const chargeSpan = startSpan(this.tracer, TRACE_SPANS.PAYMENT_CHARGE, {
+            [TRACE_ATTRS.TOOL_NAME]: tool.name,
+            [TRACE_ATTRS.AMOUNT]: pricing.amount,
+        })
+        let outcome: Awaited<ReturnType<ReturnType<typeof this.mppx.charge>>>
+        try {
+            const charge = this.mppx.charge({
+                amount: pricing.amount,
+                currency: this.config.currency,
+                recipient: this.config.recipient,
+                description: `${tool.description} (issues access key)`,
+            })
+            outcome = await charge(extra)
+            if (outcome.status === 402) {
+                chargeSpan.setAttribute('mppmcp.outcome', 'payment-required')
+                chargeSpan.setOk()
+                throw outcome.challenge
+            }
+            chargeSpan.setOk()
+        } catch (err) {
+            if (!isPaymentRequired(err)) chargeSpan.setError(err)
+            throw err
+        } finally {
+            chargeSpan.end()
+        }
 
         // Payment cleared. Run the handler, then issue a new key.
-        const result = await tool.handler(args)
+        const result = await this.runUserHandler(tool, args)
         const record = issueRecord({
             toolName: tool.name,
             pricing,
         })
         await storeRecord(this.accessKeyStore, record)
         this.stats.accessKeysIssued++
+        rootSpan.setAttribute(TRACE_ATTRS.ACCESS_KEY_JUST_ISSUED, true)
 
         // The first redeem of a key happens implicitly by the call that paid
         // for it — decrement once if maxCalls was set.
@@ -594,6 +769,10 @@ export class PaidMcpServer {
             string,
             unknown
         >
+        const receipt = readReceipt(withReceipt)
+        if (receipt?.reference) {
+            rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_TX_HASH, receipt.reference)
+        }
         this.appendCall({
             tool: tool.name,
             timestamp: new Date().toISOString(),
@@ -974,6 +1153,23 @@ function isPaymentRequired(err: unknown): boolean {
 /** @internal Resolve after `ms` milliseconds. */
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * @internal Read the MPP receipt payload (`{ method, reference,
+ * timestamp }`) out of an MCP CallToolResult. Mppx attaches it to
+ * `_meta['org.paymentauth/receipt']` after a successful settlement.
+ * Returns undefined when no receipt is present (free / cached calls).
+ */
+function readReceipt(
+    result: unknown
+): { method?: string; reference?: string; timestamp?: string } | undefined {
+    if (typeof result !== 'object' || result === null) return undefined
+    const meta = (result as { _meta?: Record<string, unknown> })._meta
+    if (!meta) return undefined
+    const receipt = meta['org.paymentauth/receipt']
+    if (typeof receipt !== 'object' || receipt === null) return undefined
+    return receipt as { method?: string; reference?: string; timestamp?: string }
 }
 
 /**

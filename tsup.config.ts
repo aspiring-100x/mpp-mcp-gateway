@@ -11,6 +11,7 @@ export default defineConfig({
         'rate-limit': 'src/rate-limit.ts',
         auth: 'src/auth.ts',
         metrics: 'src/metrics.ts',
+        tracing: 'src/tracing.ts',
     },
     format: ['esm'],
     dts: true,

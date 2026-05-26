@@ -66,6 +66,14 @@ export {
     type MetricsOptions,
 } from './metrics.js'
 export {
+    SPAN_STATUS,
+    TRACE_ATTRS,
+    TRACE_SPANS,
+    startSpan,
+    withSpan,
+    type ActiveSpan,
+} from './tracing.js'
+export {
     apiKey,
     auth,
     basicAuth,

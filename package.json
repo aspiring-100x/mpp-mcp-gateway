@@ -41,6 +41,10 @@
         "./metrics": {
             "types": "./dist/metrics.d.ts",
             "import": "./dist/metrics.js"
+        },
+        "./tracing": {
+            "types": "./dist/tracing.d.ts",
+            "import": "./dist/tracing.js"
         }
     },
     "scripts": {
@@ -84,11 +88,15 @@
     },
     "peerDependencies": {
         "@cloudflare/workers-types": "*",
+        "@opentelemetry/api": "^1.0.0",
         "@upstash/redis": "^1.0.0",
         "express": ">=5"
     },
     "peerDependenciesMeta": {
         "@cloudflare/workers-types": {
+            "optional": true
+        },
+        "@opentelemetry/api": {
             "optional": true
         },
         "@upstash/redis": {
@@ -99,6 +107,7 @@
         }
     },
     "devDependencies": {
+        "@opentelemetry/api": "^1.9.0",
         "@types/express": "^5.0.0",
         "@types/node": "^25.7.0",
         "express": "^5.0.0",
