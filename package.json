@@ -61,6 +61,7 @@
         "test": "vitest run",
         "test:watch": "vitest",
         "bench": "vitest bench benchmarks/",
+        "docs": "typedoc",
         "test:unit": "vitest run --exclude 'tests/paid-flow.test.ts' --exclude 'tests/sessions-flow.test.ts' --exclude 'tests/access-keys-flow.test.ts'",
         "example:demo": "tsx examples/in-memory-demo/demo.ts",
         "example:server": "tsx examples/paid-weather-mcp/server.ts",
@@ -121,6 +122,7 @@
         "express": "^5.0.0",
         "tsup": "^8.0.0",
         "tsx": "^4.0.0",
+        "typedoc": "^0.28.19",
         "typescript": "^5.4.0",
         "vitest": "^4.1.6"
     }
