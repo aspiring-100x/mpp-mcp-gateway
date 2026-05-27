@@ -115,6 +115,52 @@ export function writeLogLine(line: string): void {
 }
 
 /**
+ * Compute an HMAC-SHA-256 of `body` using `secret` and return the
+ * hex-encoded digest. Async because Web Crypto's HMAC API is async
+ * by design (it works the same on Node 19+, Cloudflare Workers,
+ * Vercel Edge, Deno, and Bun).
+ *
+ * Note: Node's native `node:crypto.createHmac` is faster and
+ * synchronous, but importing it would block this helper on Node-
+ * only runtimes. We keep the universal path; the cost difference
+ * is negligible for webhook dispatch (microseconds per call).
+ *
+ * @example
+ * ```ts
+ * const sig = await hmacSha256Hex('shared-secret', 'message-body')
+ * // → 64-char lowercase hex
+ * ```
+ */
+export async function hmacSha256Hex(
+    secret: string,
+    body: string
+): Promise<string> {
+    const c = (globalThis as { crypto?: Crypto }).crypto
+    if (!c?.subtle) {
+        throw new Error(
+            `Web Crypto subtle API is not available in this runtime. ` +
+            `mpp-mcp-gateway requires Node 19+, Cloudflare Workers, ` +
+            `Vercel Edge, Deno, Bun, or a similar environment.`
+        )
+    }
+    const enc = new TextEncoder()
+    const key = await c.subtle.importKey(
+        'raw',
+        enc.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+    )
+    const sig = await c.subtle.sign('HMAC', key, enc.encode(body))
+    const buf = new Uint8Array(sig)
+    let out = ''
+    for (let i = 0; i < buf.length; i++) {
+        out += buf[i]!.toString(16).padStart(2, '0')
+    }
+    return out
+}
+
+/**
  * Detect whether the current runtime is Node.js. Useful for code
  * paths that want to pick a runtime-specific behavior without
  * routing through the abstractions above.

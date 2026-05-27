@@ -74,6 +74,19 @@ export {
     type ActiveSpan,
 } from './tracing.js'
 export {
+    createWebhookDispatcher,
+    WebhookDispatcher,
+    type AccessKeyExpiredData,
+    type AccessKeyIssuedData,
+    type CallFailedData,
+    type PaymentReceivedData,
+    type SessionClosedData,
+    type SessionOpenedData,
+    type WebhookConfig,
+    type WebhookEvent,
+    type WebhookEventType,
+} from './webhooks.js'
+export {
     apiKey,
     auth,
     basicAuth,

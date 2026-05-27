@@ -63,6 +63,7 @@ import {
     TRACE_SPANS,
     type ActiveSpan,
 } from './tracing.js'
+import { WebhookDispatcher } from './webhooks.js'
 import type {
     CallLogEntry,
     GatewayStats,
@@ -156,6 +157,13 @@ export class PaidMcpServer {
      * case so non-traced deployments pay zero cost.
      */
     private tracer: Tracer | undefined
+    /**
+     * Optional webhook dispatcher. `undefined` when no
+     * `webhooks` config was supplied. When set, runtime event
+     * sites (paid call settled, access-key issued, session opened
+     * / closed, call failed) emit through it asynchronously.
+     */
+    private webhooks: WebhookDispatcher | undefined
     /**
      * Fixed-size ring buffer of recent calls. Pre-allocated to
      * `callLogCapacity` and reused — `appendCall` is O(1) regardless of
@@ -273,6 +281,13 @@ export class PaidMcpServer {
         this.rateLimitKeyExtractor =
             rl.keyExtractor ?? ((toolName) => toolName)
         this.tracer = config.tracer
+        // Webhook dispatcher only exists when explicitly configured.
+        // The constructor validates url/secret eagerly so a missing
+        // value crashes startup rather than silently dropping
+        // events later.
+        this.webhooks = config.webhooks
+            ? new WebhookDispatcher(config.webhooks, this.logger)
+            : undefined
     }
 
     /**
@@ -466,6 +481,12 @@ export class PaidMcpServer {
             if (receipt?.reference) {
                 rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_TX_HASH, receipt.reference)
             }
+            this.webhooks?.emit('payment.received', {
+                tool: tool.name,
+                mode: tool.pricing.type,
+                amount,
+                ...(receipt?.reference && { txHash: receipt.reference }),
+            })
             return wrapped
         } catch (err) {
             // 402 challenges flow through the catch but they aren't real
@@ -473,6 +494,10 @@ export class PaidMcpServer {
             // detect them by the presence of `data.challenges` and skip
             // logging them as errors.
             if (!isPaymentRequired(err)) {
+                const message =
+                    err instanceof Error
+                        ? err.message
+                        : String(err ?? 'unknown error')
                 this.appendCall({
                     tool: tool.name,
                     timestamp: new Date().toISOString(),
@@ -487,10 +512,15 @@ export class PaidMcpServer {
                                     ? 'tiered'
                                     : 'per-call'
                         : 'free',
-                    error:
-                        err instanceof Error
-                            ? err.message
-                            : String(err ?? 'unknown error'),
+                    error: message,
+                })
+                // Emit call.failed for genuine failures only —
+                // payment-required (402) is control flow.
+                const code = readErrorCode(err)
+                this.webhooks?.emit('call.failed', {
+                    tool: tool.name,
+                    ...(code && { code }),
+                    message,
                 })
             }
             throw err
@@ -633,6 +663,36 @@ export class PaidMcpServer {
         if (receipt?.reference) {
             rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_TX_HASH, receipt.reference)
         }
+        // Compute the live "open channels" count (opened minus
+        // closed) for inclusion in the webhook payload. This gives
+        // operators a running counter without needing to subscribe
+        // to every event and do their own arithmetic.
+        const sessionsOpen =
+            this.stats.sessionsOpened - this.stats.sessionsClosed
+        if (action === 'open') {
+            this.webhooks?.emit('session.opened', {
+                tool: tool.name,
+                sessionsOpen,
+            })
+        }
+        if (action === 'close') {
+            this.webhooks?.emit('session.closed', {
+                tool: tool.name,
+                amount: tool.pricing.amount,
+                ...(receipt?.reference && { txHash: receipt.reference }),
+                sessionsOpen,
+            })
+        }
+        // Emit a generic payment.received for every voucher /
+        // open / close — operators tracking revenue dashboards
+        // typically want the per-call amount regardless of the
+        // session sub-action.
+        this.webhooks?.emit('payment.received', {
+            tool: tool.name,
+            mode: 'session',
+            amount: tool.pricing.amount,
+            ...(receipt?.reference && { txHash: receipt.reference }),
+        })
         return wrapped
     }
 
@@ -710,6 +770,11 @@ export class PaidMcpServer {
             // Key was rejected. If it expired or was exhausted, count it.
             if (outcome.reason === 'expired' || outcome.reason === 'exhausted') {
                 this.stats.accessKeysExpired++
+                this.webhooks?.emit('access-key.expired', {
+                    tool: tool.name,
+                    key: incomingKey,
+                    reason: outcome.reason,
+                })
             }
             // Fall through to the pay flow — agent will need to pay again.
         }
@@ -781,6 +846,26 @@ export class PaidMcpServer {
             paymentMode: 'access-key',
             amount: pricing.amount,
             accessKeyJustIssued: true,
+        })
+        // Emit issuance + payment events. The issuance event
+        // carries the key token so operators can correlate it
+        // with downstream redemption traffic.
+        this.webhooks?.emit('access-key.issued', {
+            tool: tool.name,
+            key: decremented.key,
+            ...(decremented.expiresAt !== null && {
+                expiresAt: decremented.expiresAt,
+            }),
+            ...(decremented.remainingCalls !== null && {
+                remainingCalls: decremented.remainingCalls,
+            }),
+            ...(receipt?.reference && { txHash: receipt.reference }),
+        })
+        this.webhooks?.emit('payment.received', {
+            tool: tool.name,
+            mode: 'access-key',
+            amount: pricing.amount,
+            ...(receipt?.reference && { txHash: receipt.reference }),
         })
         return attachAccessKey(withReceipt, decremented, true)
     }
@@ -964,6 +1049,34 @@ export class PaidMcpServer {
         }
 
         log.info('drain complete', { durationMs: Date.now() - drainStart })
+
+        // Drain pending webhook deliveries within the remaining
+        // shutdown budget. We don't extend the deadline — webhook
+        // dispatch is fire-and-forget by design and operators who
+        // need durable delivery should mirror against their own
+        // queue. But we make a best-effort wait so events emitted
+        // late in the call stream (e.g. final session.closed) get
+        // a fair chance to land before the process exits.
+        if (this.webhooks && this.webhooks.inFlightCount() > 0) {
+            log.info('draining webhooks', {
+                pending: this.webhooks.inFlightCount(),
+            })
+            const remaining = deadline - Date.now()
+            if (remaining > 0) {
+                await Promise.race([
+                    this.webhooks.drain(),
+                    sleep(remaining),
+                ])
+            }
+            const stillPending = this.webhooks.inFlightCount()
+            if (stillPending > 0) {
+                log.warn('webhooks did not finish draining', {
+                    stillPending,
+                })
+            } else {
+                log.info('webhook drain complete')
+            }
+        }
 
         // Disconnect the MCP transport. mcp.close() may not exist on
         // every SDK version; tolerate its absence.
@@ -1170,6 +1283,18 @@ function readReceipt(
     const receipt = meta['org.paymentauth/receipt']
     if (typeof receipt !== 'object' || receipt === null) return undefined
     return receipt as { method?: string; reference?: string; timestamp?: string }
+}
+
+/**
+ * @internal Read the stable error code off any thrown value, when
+ * the value carries one. Library errors (`MppMcpError` subclasses)
+ * set `code`; other errors don't, so this returns `undefined` for
+ * arbitrary throws.
+ */
+function readErrorCode(err: unknown): string | undefined {
+    if (typeof err !== 'object' || err === null) return undefined
+    const candidate = (err as { code?: unknown }).code
+    return typeof candidate === 'string' ? candidate : undefined
 }
 
 /**

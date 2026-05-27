@@ -12,6 +12,7 @@ export default defineConfig({
         auth: 'src/auth.ts',
         metrics: 'src/metrics.ts',
         tracing: 'src/tracing.ts',
+        webhooks: 'src/webhooks.ts',
     },
     format: ['esm'],
     dts: true,

@@ -9,6 +9,7 @@ import type { z } from 'zod'
 
 import type { Logger } from './logger.js'
 import type { RateLimiter } from './rate-limit.js'
+import type { WebhookConfig } from './webhooks.js'
 
 /** Pricing model for a paid MCP tool. */
 export type PricingModel =
@@ -267,6 +268,24 @@ export interface PaidMcpServerConfig {
      * non-traced deployments pay zero cost.
      */
     tracer?: Tracer
+    /**
+     * Optional webhook configuration. When set, the gateway
+     * pushes events (`payment.received`, `access-key.issued`,
+     * `session.opened`, `session.closed`, `access-key.expired`,
+     * `call.failed`) to the configured URL with HMAC-SHA-256
+     * signatures.
+     *
+     * Delivery is fire-and-forget: tool-call latency is
+     * unaffected by webhook receiver behavior. Events that fail
+     * delivery after the configured retry budget are logged at
+     * `error` level and dropped — there's no on-disk persistence.
+     * For durable delivery, mirror this against your own queue
+     * (Postgres, Redis Streams, SQS).
+     *
+     * See {@link WebhookConfig} for the full configuration shape
+     * and {@link WebhookEvent} for the wire format.
+     */
+    webhooks?: WebhookConfig
 }
 
 /** Configuration for creating a payment-enabled MCP client. */
