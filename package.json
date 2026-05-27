@@ -60,6 +60,7 @@
         "typecheck": "tsc --noEmit",
         "test": "vitest run",
         "test:watch": "vitest",
+        "test:types": "tsd",
         "bench": "vitest bench benchmarks/",
         "docs": "typedoc",
         "test:unit": "vitest run --exclude 'tests/paid-flow.test.ts' --exclude 'tests/sessions-flow.test.ts' --exclude 'tests/access-keys-flow.test.ts'",
@@ -120,10 +121,14 @@
         "@types/express": "^5.0.0",
         "@types/node": "^25.7.0",
         "express": "^5.0.0",
+        "tsd": "^0.33.0",
         "tsup": "^8.0.0",
         "tsx": "^4.0.0",
         "typedoc": "^0.28.19",
         "typescript": "^5.4.0",
         "vitest": "^4.1.6"
+    },
+    "tsd": {
+        "directory": "tests/typetests"
     }
 }
