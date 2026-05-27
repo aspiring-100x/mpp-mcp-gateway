@@ -210,6 +210,9 @@ export function createCloudflareKvStore(
  *
  * Exported so it can be invoked from the server constructor without
  * coupling the server module to Cloudflare specifics.
+ *
+ * @experimental May become a runtime validation rather than a string
+ * constant in a future minor version.
  */
 export const CLOUDFLARE_KV_SESSION_WARNING = `Cloudflare KV is configured ` +
     `as the session store. KV's eventual consistency makes voucher state ` +
