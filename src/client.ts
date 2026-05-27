@@ -77,6 +77,39 @@ export class PaidMcpClient {
         }
     >()
 
+    /**
+     * Per-tool channel state for session-priced calls. Populated via
+     * the mppx `onChannelUpdate` callback whenever the channel opens
+     * or a voucher advances. We track the *latest* entry per tool so
+     * `closeSession(toolName)` can submit the right close credential
+     * without the caller having to plumb channel ids through.
+     *
+     * Only the most-recent channel for a given tool is stored: if an
+     * agent opens, closes, then re-opens a channel for the same
+     * tool, the older entry is overwritten. This matches the auto-
+     * managed mppx flow where one tool typically owns one open
+     * channel at a time.
+     */
+    private openSessions = new Map<
+        string,
+        {
+            channelId: string
+            cumulativeAmount: bigint
+            escrowContract: string
+            chainId: number
+            updatedAt: number
+        }
+    >()
+
+    /**
+     * Tool name associated with the most recent channel update, used
+     * by `onChannelUpdate` to attribute updates to the right tool.
+     * mppx's callback gives us the channel state but not the tool;
+     * we set this immediately before invoking a session call so the
+     * subsequent callback can index correctly.
+     */
+    private currentSessionTool: string | undefined
+
     constructor(config: PaidMcpClientConfig) {
         this.config = {
             ...config,
@@ -116,6 +149,20 @@ export class PaidMcpClient {
             const decimals = 6 // pathUSD; matches tempo defaults
             const cumulative = Number(entry.cumulativeAmount) / 10 ** decimals
             this.cumulativeVoucher = cumulative
+
+            // Track per-tool channel state so closeSession() can act
+            // on it later. The tool attribution comes from
+            // currentSessionTool, set immediately before the call
+            // that triggered this update.
+            if (this.currentSessionTool) {
+                this.openSessions.set(this.currentSessionTool, {
+                    channelId: entry.channelId,
+                    cumulativeAmount: entry.cumulativeAmount,
+                    escrowContract: entry.escrowContract,
+                    chainId: entry.chainId,
+                    updatedAt: Date.now(),
+                })
+            }
         })
     }
 
@@ -189,11 +236,22 @@ export class PaidMcpClient {
             // retries the tool call, and surfaces the receipt.
             // We pass through any cached access key in case the server's
             // challenge mode allows fallback (defensive, no-op for charge).
-            const result = await this.wrapped.callTool({
-                name,
-                arguments: args ?? {},
-                ...(baseMeta && { _meta: baseMeta }),
-            })
+            //
+            // Set currentSessionTool so the onChannelUpdate callback can
+            // attribute any session state changes from this call to the
+            // right tool name. Cleared in `finally` so subsequent
+            // non-session calls don't accidentally inherit it.
+            this.currentSessionTool = name
+            let result: Awaited<ReturnType<typeof this.wrapped.callTool>>
+            try {
+                result = await this.wrapped.callTool({
+                    name,
+                    arguments: args ?? {},
+                    ...(baseMeta && { _meta: baseMeta }),
+                })
+            } finally {
+                this.currentSessionTool = undefined
+            }
 
             const receipt = result.receipt
             if (receipt) {
@@ -337,6 +395,152 @@ export class PaidMcpClient {
     }
 
     /**
+     * Read-only snapshot of open session channels keyed by the tool
+     * name that opened them. Each entry includes the channel id, the
+     * latest cumulative voucher amount (in raw base units), the
+     * escrow contract address, and the chain id. Use this to
+     * inspect outstanding channels — typically right before
+     * disconnect — and decide which to close cooperatively.
+     *
+     * The returned object is a snapshot: mutating it does not
+     * affect the client's internal state. Channels are tracked
+     * automatically via the mppx `onChannelUpdate` callback.
+     *
+     * @example
+     * ```ts
+     * for (const [tool, state] of Object.entries(client.getOpenSessions())) {
+     *     console.log(`${tool}: ${state.channelId} @ ${state.cumulativeAmount}`)
+     * }
+     * ```
+     */
+    getOpenSessions(): Record<
+        string,
+        {
+            channelId: string
+            cumulativeAmount: bigint
+            escrowContract: string
+            chainId: number
+            updatedAt: number
+        }
+    > {
+        return Object.fromEntries(
+            Array.from(this.openSessions.entries()).map(([k, v]) => [
+                k,
+                { ...v },
+            ])
+        )
+    }
+
+    /**
+     * Cooperatively close the session channel associated with
+     * `toolName`. Submits the latest voucher with `action: 'close'`
+     * to the server, which settles the channel on-chain and
+     * disburses funds. After successful close, the channel state
+     * for this tool is dropped from the local cache.
+     *
+     * Returns:
+     *   - `{ closed: true, receipt }` on a successful settlement.
+     *     The receipt's `reference` is the on-chain tx hash.
+     *   - `{ closed: false, reason: 'no-open-channel' }` when no
+     *     channel is open for this tool.
+     *
+     * Idempotent: calling `closeSession` on a tool whose channel
+     * was already closed (locally) is a no-op that returns the
+     * `no-open-channel` outcome. Calling it after a transport-
+     * level disconnect throws — the underlying MCP client refuses
+     * to send.
+     *
+     * Recommended pattern for graceful shutdown:
+     *
+     * @example
+     * ```ts
+     * const sessions = client.getOpenSessions()
+     * for (const tool of Object.keys(sessions)) {
+     *     await client.closeSession(tool).catch((err) => {
+     *         logger.warn('failed to close session', { tool, err })
+     *     })
+     * }
+     * await client.close()
+     * ```
+     */
+    async closeSession(
+        toolName: string
+    ): Promise<
+        | {
+            closed: true
+            receipt: {
+                method: string
+                reference: string
+                timestamp: string
+            }
+        }
+        | { closed: false; reason: 'no-open-channel' }
+    > {
+        const state = this.openSessions.get(toolName)
+        if (!state) {
+            return { closed: false, reason: 'no-open-channel' }
+        }
+
+        // Hand the close credential context to mppx via callTool's
+        // `options.context`. The wrapped client then picks the
+        // session intent (matched by method name 'tempo'), invokes
+        // the manual-mode path with action='close', signs the
+        // close voucher, and submits it through the MCP wire as
+        // a tool call's _meta credential. The server's mppx
+        // session handler recognizes action='close' and settles
+        // on-chain.
+        //
+        // We submit the close against the same tool that opened
+        // the channel — any session-priced tool would work, but
+        // using the originating tool keeps server-side stats and
+        // logs aligned with the channel lifecycle.
+        const result = await this.wrapped.callTool(
+            {
+                name: toolName,
+                arguments: {},
+            },
+            {
+                context: {
+                    action: 'close',
+                    channelId: state.channelId,
+                    cumulativeAmountRaw: state.cumulativeAmount.toString(),
+                } as never,
+            }
+        )
+
+        // Drop local state on successful close. Any subsequent
+        // call to closeSession for this tool returns
+        // 'no-open-channel'.
+        this.openSessions.delete(toolName)
+
+        const receipt = result.receipt
+        if (!receipt) {
+            // mppx returned no receipt — this means the server
+            // didn't ack the close. Surface as an error rather
+            // than silently claim success.
+            throw new Error(
+                `closeSession("${toolName}") returned no receipt — close may not have settled.`
+            )
+        }
+
+        this.logger.info('session channel closed', {
+            tool: toolName,
+            channelId: state.channelId,
+            cumulativeAmount: state.cumulativeAmount.toString(),
+            txHash: receipt.reference,
+        })
+
+        return {
+            closed: true,
+            receipt: {
+                method: receipt.method,
+                reference: receipt.reference,
+                timestamp: receipt.timestamp,
+            },
+        }
+    }
+
+    /**
      * @internal Look up a cached access key for a tool, evicting if it
      * has obviously expired or been exhausted (defensive client-side check;
      * the server is the source of truth).
@@ -429,6 +633,21 @@ export function createPaidMcpClient(config: PaidMcpClientConfig): PaidMcpClient 
 }
 
 /**
+ * @internal Shape of channel-state updates that mppx pushes through
+ * `onChannelUpdate`. Subset of mppx's `ChannelEntry` type — we
+ * declare it locally to avoid coupling our public API to mppx's
+ * internal exports.
+ */
+interface ChannelUpdateEntry {
+    channelId: string
+    cumulativeAmount: bigint
+    escrowContract: string
+    chainId: number
+    salt?: string
+    opened?: boolean
+}
+
+/**
  * @internal Build the mppx McpClient.wrap proxy with the right method tuple.
  * Extracted so its return type can drive the `wrapped` field's type without
  * a generic-instantiation mismatch.
@@ -437,7 +656,7 @@ function buildWrapped(
     raw: Client,
     account: ReturnType<typeof privateKeyToAccount>,
     config: PaidMcpClientConfig,
-    onChannelUpdate: (entry: { cumulativeAmount: bigint }) => void
+    onChannelUpdate: (entry: ChannelUpdateEntry) => void
 ) {
     const methods = tempo({
         account,
