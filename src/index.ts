@@ -152,6 +152,7 @@ export {
 export * from './constants.js'
 export type {
     CallLogEntry,
+    CurrencyOffer,
     GatewayStats,
     PaidCallResult,
     PaidMcpClientConfig,

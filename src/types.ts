@@ -11,9 +11,31 @@ import type { Logger } from './logger.js'
 import type { RateLimiter } from './rate-limit.js'
 import type { WebhookConfig } from './webhooks.js'
 
+/**
+ * A currency-specific price offer. Used in the `accept` array to
+ * advertise that a tool accepts multiple TIP-20 stablecoins at
+ * potentially different amounts.
+ */
+export interface CurrencyOffer {
+    /** TIP-20 token contract address. */
+    currency: `0x${string}`
+    /** Price in that currency as a USD-equivalent decimal string. */
+    amount: string
+}
+
 /** Pricing model for a paid MCP tool. */
 export type PricingModel =
-    | { type: 'per-call'; amount: string }
+    | {
+        type: 'per-call'
+        amount: string
+        /**
+         * Optional multi-currency acceptance. When set, the discovery
+         * endpoint advertises one offer per entry (in addition to or
+         * instead of the server-level default currency). Backward
+         * compatible: if omitted, behavior is unchanged.
+         */
+        accept?: CurrencyOffer[]
+    }
     | { type: 'tiered'; tiers: PricingTier[] }
     | {
         /**
@@ -46,6 +68,12 @@ export type PricingModel =
          * string. Helps prevent dust-spam vouchers. Defaults to `amount`.
          */
         minVoucherDelta?: string
+        /**
+         * Optional multi-currency acceptance. When set, the discovery
+         * endpoint advertises one offer per entry. Backward compatible:
+         * if omitted, behavior is unchanged.
+         */
+        accept?: CurrencyOffer[]
     }
     | {
         /**
@@ -77,6 +105,12 @@ export type PricingModel =
          * Omit for an unlimited-call key bounded only by `validFor`.
          */
         maxCalls?: number
+        /**
+         * Optional multi-currency acceptance. When set, the discovery
+         * endpoint advertises one offer per entry. Backward compatible:
+         * if omitted, behavior is unchanged.
+         */
+        accept?: CurrencyOffer[]
     }
 
 export interface PricingTier {

@@ -218,6 +218,11 @@ function buildOperation(
  * @internal Build payment offers from a `PricingModel`. Per the MPP
  * discovery spec, `amount` is in the smallest denomination of the
  * currency. We support `tempo.charge` and `tempo.session` intents.
+ *
+ * When a pricing model includes an `accept` array (multi-currency),
+ * we emit one offer per accepted currency instead of a single offer
+ * using the server-level default. This is backward compatible: if
+ * `accept` is omitted, one offer is emitted using `currency`.
  */
 function buildOffers(
     pricing: PricingModel,
@@ -225,6 +230,14 @@ function buildOffers(
     decimals: number
 ): Array<Record<string, unknown>> {
     if (pricing.type === 'per-call') {
+        if (pricing.accept && pricing.accept.length > 0) {
+            return pricing.accept.map((entry) => ({
+                intent: 'charge',
+                method: 'tempo',
+                amount: usdToBaseUnits(entry.amount, decimals),
+                currency: entry.currency,
+            }))
+        }
         return [
             {
                 intent: 'charge',
@@ -252,6 +265,15 @@ function buildOffers(
         ]
     }
     if (pricing.type === 'session') {
+        if (pricing.accept && pricing.accept.length > 0) {
+            return pricing.accept.map((entry) => ({
+                intent: 'session',
+                method: 'tempo',
+                amount: usdToBaseUnits(entry.amount, decimals),
+                currency: entry.currency,
+                description: `Per-${pricing.unitType} via on-chain payment channel.`,
+            }))
+        }
         return [
             {
                 intent: 'session',
@@ -266,13 +288,24 @@ function buildOffers(
         const bounds: string[] = []
         if (pricing.validFor) bounds.push(`valid for ${pricing.validFor}`)
         if (pricing.maxCalls) bounds.push(`up to ${pricing.maxCalls} calls`)
+        const description = `Access key — pay once, ${bounds.join(', ')}.`
+
+        if (pricing.accept && pricing.accept.length > 0) {
+            return pricing.accept.map((entry) => ({
+                intent: 'charge',
+                method: 'tempo',
+                amount: usdToBaseUnits(entry.amount, decimals),
+                currency: entry.currency,
+                description,
+            }))
+        }
         return [
             {
                 intent: 'charge',
                 method: 'tempo',
                 amount: usdToBaseUnits(pricing.amount, decimals),
                 currency,
-                description: `Access key — pay once, ${bounds.join(', ')}.`,
+                description,
             },
         ]
     }
