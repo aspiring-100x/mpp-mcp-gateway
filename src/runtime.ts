@@ -44,6 +44,9 @@
  * should never happen. The error message names the runtime so
  * operators on truly esoteric platforms can plug in a polyfill.
  *
+ * @internal Exported for advanced use cases but not covered by
+ * semver stability guarantees.
+ *
  * @example
  * ```ts
  * randomHex(32)  // 64-char hex, e.g. '5f3a7c2b9e1d4a6f8b3c5e7a9f1b3d5e...'
@@ -83,6 +86,9 @@ export function randomHex(bytes: number): string {
  * (extremely unusual, e.g. embedded JS engines), the call is a
  * silent no-op rather than throwing — logging is best-effort and
  * shouldn't take down the gateway.
+ *
+ * @internal Exported for custom logger implementations but not
+ * covered by semver stability guarantees.
  */
 export function writeLogLine(line: string): void {
     // Node.js fast path: write directly to the process stderr stream.
@@ -164,6 +170,9 @@ export async function hmacSha256Hex(
  * Detect whether the current runtime is Node.js. Useful for code
  * paths that want to pick a runtime-specific behavior without
  * routing through the abstractions above.
+ *
+ * @internal Exported for edge-specific use cases but not covered by
+ * semver stability guarantees. May change or disappear in any release.
  */
 export function isNodeRuntime(): boolean {
     const proc = (globalThis as { process?: { versions?: { node?: string } } }).process

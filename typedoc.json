@@ -1,0 +1,36 @@
+{
+    "entryPoints": [
+        "src/index.ts",
+        "src/server.ts",
+        "src/client.ts",
+        "src/dashboard.ts",
+        "src/discovery.ts",
+        "src/stores/index.ts",
+        "src/rate-limit.ts",
+        "src/auth.ts",
+        "src/metrics.ts",
+        "src/tracing.ts",
+        "src/webhooks.ts"
+    ],
+    "out": "docs-site",
+    "name": "mpp-mcp-gateway",
+    "readme": "README.md",
+    "includeVersion": true,
+    "excludePrivate": true,
+    "excludeInternal": true,
+    "excludeExternals": true,
+    "plugin": [],
+    "categorizeByGroup": true,
+    "sort": [
+        "source-order"
+    ],
+    "navigation": {
+        "includeCategories": true,
+        "includeGroups": true
+    },
+    "visibilityFilters": {
+        "protected": false,
+        "private": false,
+        "@internal": false
+    }
+}

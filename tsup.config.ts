@@ -13,6 +13,7 @@ export default defineConfig({
         metrics: 'src/metrics.ts',
         tracing: 'src/tracing.ts',
         webhooks: 'src/webhooks.ts',
+        cli: 'src/cli.ts',
     },
     format: ['esm'],
     dts: true,
