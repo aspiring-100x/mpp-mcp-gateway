@@ -206,6 +206,15 @@ This airdrops 1M of each testnet stablecoin (pathUSD, AlphaUSD, BetaUSD, ThetaUS
 | `network` | `'mainnet' \| 'testnet'` | `'testnet'` | Which chain to settle on |
 | `tools` | `PaidToolDefinition[]` | required | The paid / free tools to expose |
 | `feePayerKey` | `0x${string}` | — | Private key for server-side fee sponsorship |
+| `accessKeyStore` | `MppMcpStore` | in-memory | Persistent store for access-key records |
+| `sessionStore` | `MppMcpStore` | in-memory | Persistent store for session channel state |
+| `callLogSize` | number | `1000` | Ring buffer capacity (set 0 to disable) |
+| `logger` | `Logger` | console+redaction | Structured logger instance |
+| `drainTimeoutMs` | number | `30000` | Graceful shutdown drain window |
+| `onShutdown` | `() => void` | — | Hook fired when `close()` begins |
+| `rateLimit` | object | `{ enabled: true }` | Rate limiting config (see docs) |
+| `tracer` | `Tracer` | — | OpenTelemetry tracer (opt-in) |
+| `webhooks` | `WebhookConfig` | — | Webhook endpoint + secret + events |
 
 ### `PaidToolDefinition`
 
@@ -383,15 +392,154 @@ The generated document includes:
 
 Once your server is publicly reachable over HTTPS, mpp.land and similar registries will pick it up automatically — no submission flow required. The 402 challenge remains authoritative; discovery is purely advisory.
 
+## Stores
+
+The library needs persistent state for access keys and session channels. Three adapters ship out of the box:
+
+```ts
+import { Store } from 'mpp-mcp-gateway/stores'
+
+// In-memory (default) — single process, lost on restart
+const store = Store.memory()
+
+// Upstash Redis — atomic CAS, multi-instance safe, edge-compatible
+import { Redis } from '@upstash/redis'
+const redis = new Redis({ url: '...', token: '...' })
+const store = Store.upstash(redis, { keyPrefix: 'mppmcp:' })
+
+// Cloudflare KV — eventually consistent, best for access keys on Workers
+const store = Store.cloudflareKv(env.MY_KV, { keyPrefix: 'ak:' })
+```
+
+Pass stores via `accessKeyStore` and `sessionStore` in server config.
+
+## Auth, Metrics, and Rate Limiting
+
+```ts
+import express from 'express'
+import {
+    createPaidMcpServer,
+    mountDashboard,
+    mountDiscovery,
+    mountMetrics,
+    auth,
+} from 'mpp-mcp-gateway'
+
+const server = createPaidMcpServer({ ... })
+const app = express()
+
+// Dashboard — auth-gated
+mountDashboard(server, app, {
+    middleware: auth.bearerToken(process.env.DASHBOARD_TOKEN!),
+})
+
+// Metrics — Prometheus text format, auth-gated
+mountMetrics(server, app, {
+    middleware: auth.bearerToken(process.env.METRICS_TOKEN!),
+})
+
+// Discovery — public with CORS for registry crawlers
+mountDiscovery(server, app, {
+    middleware: auth.publicCors(),
+    baseUrl: 'https://api.example.com',
+})
+```
+
+Rate limiting is on by default (60 req/min/tool). For multi-instance deployments:
+
+```ts
+import { upstashTokenBucketLimiter } from 'mpp-mcp-gateway/rate-limit'
+
+const server = createPaidMcpServer({
+    // ...
+    rateLimit: {
+        limiter: upstashTokenBucketLimiter(redis, {
+            keyPrefix: 'rl:',
+            refillPerMinute: 120,
+            capacity: 30,
+        }),
+    },
+})
+```
+
+## Webhooks
+
+Push events to your own endpoint when payments settle, sessions open/close, or calls fail:
+
+```ts
+const server = createPaidMcpServer({
+    // ...
+    webhooks: {
+        url: 'https://example.com/mppmcp/webhook',
+        secret: process.env.WEBHOOK_SECRET!,
+        events: ['payment.received', 'session.closed', 'call.failed'],
+    },
+})
+```
+
+Events are HMAC-signed (`X-MppMcp-Signature`), fire-and-forget with retry (1s → 4s → 16s).
+
+## CLI
+
+Inspect and manage deployed gateways from the command line:
+
+```bash
+npx mpp-mcp inspect https://my-gateway.fly.dev --token=secret
+npx mpp-mcp stats https://api.example.com --token=admin
+npx mpp-mcp tools https://api.example.com --token=admin
+npx mpp-mcp calls https://api.example.com --token=admin --limit=50
+npx mpp-mcp keys list https://api.example.com --token=admin
+```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`docs/production-checklist.md`](docs/production-checklist.md) | Go-live tick-list |
+| [`docs/deployment-cloudflare-workers.md`](docs/deployment-cloudflare-workers.md) | Edge deployment guide |
+| [`docs/deployment-vercel.md`](docs/deployment-vercel.md) | Serverless deployment guide |
+| [`docs/deployment-fly-io.md`](docs/deployment-fly-io.md) | Persistent process deployment |
+| [`docs/architecture.md`](docs/architecture.md) | Internals reference (diagrams, data flow) |
+| [`docs/migration-from-0.1.md`](docs/migration-from-0.1.md) | Upgrade guide |
+| [`docs/api-stability.md`](docs/api-stability.md) | Export stability classifications |
+
 ## Roadmap
 
-- [x] MPP Sessions integration — offchain voucher streaming for long-running tools
-- [ ] Cooperative session close — `client.closeSession()` to settle on-chain before disconnect
-- [x] Access keys — subscription-style recurring access to tools
-- [x] Dashboard UI — revenue tracking, per-tool analytics
-- [x] Discovery — register on MPPScan / mpp.dev/services
-- [x] HTTP / SSE transport examples alongside stdio
+### Shipped ✅
+
+- [x] Per-call, tiered, session, and access-key pricing
+- [x] Cooperative session close — `client.closeSession()` settles on-chain
+- [x] Access keys — subscription-style recurring access
+- [x] Dashboard UI — live revenue tracking, per-tool analytics
+- [x] Discovery — OpenAPI + `x-payment-info` for registry crawling
+- [x] HTTP / SSE / stdio transport examples
+- [x] Multi-currency offers — tools can advertise acceptance of multiple stablecoins
+- [x] Persistent stores — Upstash Redis (atomic CAS), Cloudflare KV, in-memory
+- [x] Rate limiting — in-memory token bucket + Upstash Redis (multi-instance)
+- [x] Auth middleware — bearer token, API key, basic auth, signed query, public CORS
+- [x] Prometheus `/metrics` endpoint
+- [x] OpenTelemetry tracing — opt-in span tree per paid call
+- [x] Structured logging with secret redaction
+- [x] Graceful shutdown with drain timeout
+- [x] Webhooks — 6 event types, HMAC-signed, retry with backoff
+- [x] Error taxonomy — 9 typed error classes with stable codes
+- [x] BigInt-exact revenue tracking (no float drift)
+- [x] O(1) ring-buffer call log
+- [x] Edge runtime compatibility (Workers, Vercel Edge, Deno, Bun)
+- [x] Operator CLI — `npx mpp-mcp inspect/stats/tools/calls/keys`
+- [x] API stability freeze with `docs/api-stability.md`
+- [x] Performance benchmarks
+- [x] TypeDoc API reference
+- [x] Type-level test suite (tsd)
+- [x] Deployment guides (Cloudflare Workers, Vercel, Fly.io)
+- [x] Production checklist + architecture reference
+
+### Next
+
 - [ ] Published to npm
+- [ ] CI pipeline (GitHub Actions: test, release, integration)
+- [ ] TypeDoc site deployed to GitHub Pages
+- [ ] CHANGELOG automation (changesets or similar)
 
 ## License
 
