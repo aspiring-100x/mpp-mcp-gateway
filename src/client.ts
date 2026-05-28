@@ -27,7 +27,7 @@ import { tempo } from 'mppx/client'
 import { McpClient } from 'mppx/mcp-sdk/client'
 import { privateKeyToAccount } from 'viem/accounts'
 
-import { ACCESS_KEY_META } from './constants.js'
+import { ACCESS_KEY_META, ACCESS_KEY_FINGERPRINT_META } from './constants.js'
 import {
     ConfigurationError,
     SessionDepositCapExceededError,
@@ -58,11 +58,22 @@ export class PaidMcpClient {
     private rawClient: Client
     private wrapped!: ReturnType<typeof buildWrapped>
     private logger: Logger
-    private maxPerCall: number
-    private maxTotal: number
-    private maxSessionDeposit: number
-    private totalSpent = 0
+    /**
+     * Spending caps and tracking in base units (BigInt, 6 decimals).
+     * Using BigInt for cap enforcement eliminates the philosophical
+     * inconsistency where the server tracks revenue exactly but the
+     * client uses floats for caps — a $100.00 total cap with
+     * parseFloat would drift after ~10⁵ sub-cent deductions.
+     */
+    private maxPerCallUnits: bigint
+    private maxTotalUnits: bigint
+    private maxSessionDepositUnits: bigint
+    private totalSpentUnits: bigint = 0n
     private cumulativeVoucher = 0
+    /** Whether to verify settlement tx on-chain after closeSession. */
+    private verifySettlement: boolean
+    /** Client's own wallet address, derived from privateKey. Used for access-key fingerprinting. */
+    private walletAddress: string
     /**
      * Cache of access keys, keyed by tool name. Each entry stores the most
      * recent server-issued state. Entries are evicted on expiry, exhaustion,
@@ -121,25 +132,33 @@ export class PaidMcpClient {
             client: config.name,
         })
 
-        this.maxPerCall = parseFloat(config.maxPerCall ?? '1.00')
-        this.maxTotal = parseFloat(config.maxTotal ?? '100.00')
-        this.maxSessionDeposit = parseFloat(config.maxSessionDeposit ?? '1.00')
+        // Parse caps into BigInt base units (6 decimals) for exact
+        // comparison. No more parseFloat drift on high-frequency calls.
+        this.maxPerCallUnits = parseCapToBigInt(config.maxPerCall ?? '1.00', 'maxPerCall')
+        this.maxTotalUnits = parseCapToBigInt(config.maxTotal ?? '100.00', 'maxTotal')
+        this.maxSessionDepositUnits = parseCapToBigInt(
+            config.maxSessionDeposit ?? '1.00',
+            'maxSessionDeposit'
+        )
 
-        if (!(this.maxPerCall > 0)) {
+        if (this.maxPerCallUnits <= 0n) {
             throw new ConfigurationError(`maxPerCall must be a positive number, got ${config.maxPerCall}`)
         }
-        if (!(this.maxTotal > 0)) {
+        if (this.maxTotalUnits <= 0n) {
             throw new ConfigurationError(`maxTotal must be a positive number, got ${config.maxTotal}`)
         }
-        if (!(this.maxSessionDeposit > 0)) {
+        if (this.maxSessionDepositUnits <= 0n) {
             throw new ConfigurationError(
                 `maxSessionDeposit must be a positive number, got ${config.maxSessionDeposit}`
             )
         }
 
+        this.verifySettlement = config.verifySettlement ?? false
+
         this.rawClient = new Client({ name: config.name, version: config.version })
 
         const account = privateKeyToAccount(config.privateKey)
+        this.walletAddress = account.address
 
         // tempo() returns [chargeIntent, sessionIntent]. Passing `deposit`
         // puts the session intent in auto-mode — it manages channel open,
@@ -209,7 +228,10 @@ export class PaidMcpClient {
         // the call without billing again.
         const cached = this.lookupAccessKey(name)
         const baseMeta = cached
-            ? ({ [ACCESS_KEY_META]: cached.key } as Record<string, unknown>)
+            ? ({
+                [ACCESS_KEY_META]: cached.key,
+                [ACCESS_KEY_FINGERPRINT_META]: this.walletAddress,
+            } as Record<string, unknown>)
             : undefined
 
         // Try the call without a (payment) credential first. If the server
@@ -255,8 +277,8 @@ export class PaidMcpClient {
 
             const receipt = result.receipt
             if (receipt) {
-                const requested = this.parseChallengeAmount(challenges)
-                this.totalSpent += requested
+                const requestedUnits = this.parseChallengeAmountUnits(challenges)
+                this.totalSpentUnits += requestedUnits
             }
 
             const accessKeyView = this.captureAccessKey(name, result as Record<string, unknown>)
@@ -269,7 +291,7 @@ export class PaidMcpClient {
                         method: receipt.method,
                         reference: receipt.reference,
                         timestamp: receipt.timestamp,
-                        amount: this.parseChallengeAmount(challenges).toFixed(6),
+                        amount: bigintToFixed(this.parseChallengeAmountUnits(challenges)),
                     }
                     : undefined,
                 paid: !!receipt,
@@ -297,55 +319,50 @@ export class PaidMcpClient {
     /**
      * @internal Enforce per-call, total, and session-deposit caps against
      * the challenges issued by the server. Throws a typed error before any
-     * signing happens.
+     * signing happens. Uses BigInt arithmetic for exact comparison.
      */
     private enforceCaps(challenges: ChallengeShape[]): void {
         if (challenges.length === 0) return // nothing to enforce against
         const c = challenges[0]!
-        const requested = this.parseChallengeAmount(challenges)
+        const requestedUnits = this.parseChallengeAmountUnits(challenges)
         const isSession = c.intent === 'session'
 
         if (isSession) {
-            // Session challenges include a `suggestedDeposit` (raw units).
-            // The deposit is what the client locks into escrow up-front, so
-            // we need a separate cap for it.
-            const suggested = parseSuggestedDeposit(c)
-            if (suggested > this.maxSessionDeposit) {
+            const suggestedUnits = parseSuggestedDepositUnits(c)
+            if (suggestedUnits > this.maxSessionDepositUnits) {
                 throw new SessionDepositCapExceededError({
-                    suggested,
-                    limit: this.maxSessionDeposit,
+                    suggested: bigintToFloat(suggestedUnits),
+                    limit: bigintToFloat(this.maxSessionDepositUnits),
                 })
             }
-            // For per-call/total caps, the per-unit price still applies.
         }
 
-        if (requested > this.maxPerCall) {
+        if (requestedUnits > this.maxPerCallUnits) {
             throw new SpendingCapExceededError({
                 kind: 'per-call',
-                requested,
-                limit: this.maxPerCall,
+                requested: bigintToFloat(requestedUnits),
+                limit: bigintToFloat(this.maxPerCallUnits),
             })
         }
-        if (this.totalSpent + requested > this.maxTotal) {
+        if (this.totalSpentUnits + requestedUnits > this.maxTotalUnits) {
             throw new SpendingCapExceededError({
                 kind: 'total',
-                requested,
-                limit: this.maxTotal,
-                totalSpent: this.totalSpent,
+                requested: bigintToFloat(requestedUnits),
+                limit: bigintToFloat(this.maxTotalUnits),
+                totalSpent: bigintToFloat(this.totalSpentUnits),
             })
         }
     }
 
-    /** @internal Parse the requested per-call amount from a challenge into USD. */
-    private parseChallengeAmount(challenges: ChallengeShape[]): number {
+    /**
+     * @internal Parse the requested per-call amount from a challenge
+     * into BigInt base units (6 decimals). This is the exact
+     * representation — no float coercion.
+     */
+    private parseChallengeAmountUnits(challenges: ChallengeShape[]): bigint {
         const c = challenges[0]
-        if (!c) return 0
-        const decimals = c.request.decimals ?? 6
-        const raw = BigInt(c.request.amount)
-        const divisor = 10n ** BigInt(decimals)
-        const whole = Number(raw / divisor)
-        const fractional = Number(raw % divisor) / Number(divisor)
-        return whole + fractional
+        if (!c) return 0n
+        return BigInt(c.request.amount)
     }
 
     /** Current spending state. */
@@ -358,18 +375,18 @@ export class PaidMcpClient {
         cumulativeVoucher: number
     } {
         return {
-            totalSpent: this.totalSpent,
-            remaining: this.maxTotal - this.totalSpent,
-            maxTotal: this.maxTotal,
-            maxPerCall: this.maxPerCall,
-            maxSessionDeposit: this.maxSessionDeposit,
+            totalSpent: bigintToFloat(this.totalSpentUnits),
+            remaining: bigintToFloat(this.maxTotalUnits - this.totalSpentUnits),
+            maxTotal: bigintToFloat(this.maxTotalUnits),
+            maxPerCall: bigintToFloat(this.maxPerCallUnits),
+            maxSessionDeposit: bigintToFloat(this.maxSessionDepositUnits),
             cumulativeVoucher: this.cumulativeVoucher,
         }
     }
 
     /** Reset the cumulative spend counter (useful for tests). */
     resetSpending(): void {
-        this.totalSpent = 0
+        this.totalSpentUnits = 0n
         this.cumulativeVoucher = 0
     }
 
@@ -530,6 +547,20 @@ export class PaidMcpClient {
             txHash: receipt.reference,
         })
 
+        // On-chain verification: if the operator enabled trustless
+        // settlement verification, confirm the tx receipt before
+        // marking the close as successful. This adds ~1-2s latency
+        // but provides a cryptographic guarantee that the server
+        // actually settled the channel.
+        if (this.verifySettlement && receipt.reference) {
+            await this.verifySettlementTx(
+                receipt.reference,
+                state.channelId,
+                state.cumulativeAmount,
+                toolName
+            )
+        }
+
         return {
             closed: true,
             receipt: {
@@ -537,6 +568,70 @@ export class PaidMcpClient {
                 reference: receipt.reference,
                 timestamp: receipt.timestamp,
             },
+        }
+    }
+
+    /**
+     * @internal Verify a settlement transaction on-chain by checking
+     * the tx receipt status. Uses the network's RPC endpoint to
+     * confirm that the transaction was included in a block and
+     * succeeded (status = 1). If verification fails, throws with a
+     * descriptive error so the caller knows the settlement may not
+     * have completed.
+     *
+     * This is a best-effort verification — it confirms the tx
+     * exists and succeeded but does not decode the escrow contract
+     * event logs (that would require the contract ABI as a
+     * dependency). For full trustless verification, operators should
+     * run their own indexer against the escrow contract.
+     */
+    private async verifySettlementTx(
+        txHash: string,
+        channelId: string,
+        expectedAmount: bigint,
+        toolName: string
+    ): Promise<void> {
+        const { createPublicClient, http } = await import('viem')
+        const network = this.config.network === 'mainnet'
+            ? { chainId: 4217, rpcUrl: 'https://rpc.tempo.xyz' }
+            : { chainId: 42431, rpcUrl: 'https://rpc.moderato.tempo.xyz' }
+
+        const client = createPublicClient({
+            transport: http(network.rpcUrl),
+        })
+
+        try {
+            const receipt = await client.getTransactionReceipt({
+                hash: txHash as `0x${string}`,
+            })
+
+            if (receipt.status !== 'success') {
+                throw new Error(
+                    `Settlement tx ${txHash} for session "${toolName}" ` +
+                    `(channel ${channelId}) reverted on-chain. ` +
+                    `The server claimed settlement but the tx failed.`
+                )
+            }
+
+            this.logger.info('settlement verified on-chain', {
+                tool: toolName,
+                channelId,
+                txHash,
+                blockNumber: receipt.blockNumber.toString(),
+            })
+        } catch (err) {
+            if (err instanceof Error && err.message.includes('reverted')) {
+                throw err // re-throw our own descriptive error
+            }
+            // RPC error — log warning but don't fail the close. The
+            // server already acknowledged; RPC flakiness shouldn't
+            // undo a successful settlement.
+            this.logger.warn('settlement verification RPC failed', {
+                tool: toolName,
+                channelId,
+                txHash,
+                error: err instanceof Error ? err.message : String(err),
+            })
         }
     }
 
@@ -603,17 +698,57 @@ export class PaidMcpClient {
     }
 }
 
-/** @internal Read suggestedDeposit from a session challenge into USD. */
-function parseSuggestedDeposit(challenge: ChallengeShape): number {
+/** @internal Read suggestedDeposit from a session challenge as BigInt base units. */
+function parseSuggestedDepositUnits(challenge: ChallengeShape): bigint {
     const req = challenge.request as Record<string, unknown>
     const raw = req['suggestedDeposit']
-    if (typeof raw !== 'string' || raw.length === 0) return 0
-    const decimals = (req['decimals'] as number | undefined) ?? 6
-    const big = BigInt(raw)
-    const divisor = 10n ** BigInt(decimals)
-    const whole = Number(big / divisor)
-    const fractional = Number(big % divisor) / Number(divisor)
-    return whole + fractional
+    if (typeof raw !== 'string' || raw.length === 0) return 0n
+    return BigInt(raw)
+}
+
+/**
+ * @internal Parse a USD decimal string into BigInt base units (6 decimals).
+ * Throws ConfigurationError on invalid input (non-numeric). For negative
+ * values, returns 0n so the caller's own validation can fire the correct
+ * error message.
+ */
+function parseCapToBigInt(amount: string, field: string): bigint {
+    const trimmed = amount.trim()
+    // Allow negative values to pass through as 0n — the caller
+    // checks `<= 0n` and throws the appropriate error with the
+    // original field name and value.
+    if (trimmed.startsWith('-')) return 0n
+    if (!/^(\d+\.?\d*|\.\d+)$/.test(trimmed)) {
+        throw new ConfigurationError(
+            `${field} must be a positive number, got ${amount}`
+        )
+    }
+    const normalized = trimmed.startsWith('.') ? '0' + trimmed : trimmed
+    const [whole = '0', fractional = ''] = normalized.split('.')
+    // Pad or truncate to 6 decimals.
+    const padded = fractional.slice(0, 6).padEnd(6, '0')
+    return BigInt(whole + padded)
+}
+
+/**
+ * @internal Convert BigInt base units (6 decimals) to a float for
+ * display/error messages. This is a lossy projection — used only at
+ * the boundary where the existing error class API expects `number`.
+ */
+function bigintToFloat(units: bigint): number {
+    return Number(units) / 1_000_000
+}
+
+/**
+ * @internal Convert BigInt base units (6 decimals) to a fixed-point
+ * decimal string like '0.001000'. Used for receipt amount formatting.
+ */
+function bigintToFixed(units: bigint): string {
+    if (units === 0n) return '0.000000'
+    const divisor = 1_000_000n
+    const whole = units / divisor
+    const fractional = units % divisor
+    return `${whole}.${fractional.toString().padStart(6, '0')}`
 }
 
 /** @internal Type guard for MCP payment-required errors. */

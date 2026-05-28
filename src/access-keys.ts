@@ -44,6 +44,17 @@ export interface AccessKeyRecord {
     remainingCalls: number | null
     /** Tx hash of the original payment, for auditing. */
     paymentReference?: string
+    /**
+     * Wallet address of the client that paid for this key. When set,
+     * only requests whose `_meta` carries a matching fingerprint are
+     * authorized — prevents stolen keys from being replayed by a
+     * different agent.
+     *
+     * Set via `PaidMcpServerConfig.accessKeyBinding: 'wallet'`.
+     * When binding is `'none'` (the default for backward compat),
+     * this field is `undefined` and no fingerprint check runs.
+     */
+    boundTo?: string
 }
 
 /** Parse a compact duration string like '7d', '30m', '4h', '60s' into milliseconds. */
@@ -89,6 +100,8 @@ export function issueRecord(args: {
     toolName: string
     pricing: Extract<PricingModel, { type: 'access-key' }>
     paymentReference?: string
+    /** When binding is enabled, the wallet address to lock this key to. */
+    boundTo?: string
 }): AccessKeyRecord {
     const now = Date.now()
     // 32 bytes of crypto randomness — keys look like `mppmcp_<hex>`.
@@ -106,13 +119,14 @@ export function issueRecord(args: {
         expiresAt,
         remainingCalls,
         paymentReference: args.paymentReference,
+        ...(args.boundTo && { boundTo: args.boundTo }),
     }
 }
 
 /** Outcome of attempting to redeem (use) an access key for a tool call. */
 export type RedeemResult =
     | { ok: true; record: AccessKeyRecord }
-    | { ok: false; reason: 'unknown' | 'wrong-tool' | 'expired' | 'exhausted' }
+    | { ok: false; reason: 'unknown' | 'wrong-tool' | 'wrong-client' | 'expired' | 'exhausted' }
 
 /**
  * Atomically redeem one call against an access key. On success returns
@@ -140,11 +154,16 @@ export type RedeemResult =
  * decision corresponds to the value that actually got persisted. On
  * the in-memory adapter the transform runs exactly once. On Upstash
  * with concurrent contention the transform may run multiple times.
+ *
+ * @param clientFingerprint When the record has `boundTo` set, the
+ *   caller must supply the requesting client's wallet address. If the
+ *   fingerprint doesn't match, redemption fails with `'wrong-client'`.
  */
 export async function redeem(
     store: MppMcpStore,
     key: string,
-    toolName: string
+    toolName: string,
+    clientFingerprint?: string
 ): Promise<RedeemResult> {
     /**
      * The transform's chosen outcome. Captured in this variable so the
@@ -162,6 +181,15 @@ export async function redeem(
 
         if (record.tool !== toolName) {
             outcome = { ok: false, reason: 'wrong-tool' }
+            return record // leave the record untouched
+        }
+
+        // Fingerprint binding check: if the key was issued with a
+        // `boundTo` address, only the original client may use it.
+        // This prevents stolen keys from being replayed by a
+        // different wallet.
+        if (record.boundTo && clientFingerprint !== record.boundTo) {
+            outcome = { ok: false, reason: 'wrong-client' }
             return record // leave the record untouched
         }
 
