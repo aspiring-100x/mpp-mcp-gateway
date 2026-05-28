@@ -38,6 +38,7 @@ import {
 } from './amounts.js'
 import {
     ACCESS_KEY_META,
+    ACCESS_KEY_FINGERPRINT_META,
     DEFAULT_CURRENCY,
     TEMPO_ESCROW_MAINNET,
     TEMPO_ESCROW_TESTNET,
@@ -117,6 +118,11 @@ export class PaidMcpServer {
     private revenueUnitsByTool: Map<string, bigint>
     private startTime: number
     private accessKeyStore: MppMcpStore
+    /**
+     * Access-key binding mode. When `'wallet'`, keys are scoped to
+     * the paying client's address and can't be reused by another wallet.
+     */
+    private accessKeyBinding: 'none' | 'wallet'
     /** Structured logger for runtime events. Never null after construction. */
     private logger: Logger
     /**
@@ -208,6 +214,7 @@ export class PaidMcpServer {
         //      through the configured logger).
         //   3. Nothing passed → in-memory default with atomic update.
         this.accessKeyStore = resolveStore(config.accessKeyStore, this.logger)
+        this.accessKeyBinding = config.accessKeyBinding ?? 'none'
 
         this.callLogCapacity = Math.max(0, config.callLogSize ?? 1000)
         // Pre-allocate the ring buffer so `appendCall` never has to grow
@@ -273,10 +280,48 @@ export class PaidMcpServer {
         } else if (rl.limiter) {
             this.rateLimiter = rl.limiter
         } else {
-            this.rateLimiter = tokenBucketLimiter({
-                refillPerMinute: rl.refillPerMinute,
-                capacity: rl.capacity,
-            })
+            // Build a composite limiter that supports per-tool overrides.
+            // Each tool with explicit config gets its own bucket params;
+            // all others use the server-wide defaults.
+            const defaultRefill = rl.refillPerMinute ?? 60
+            const defaultCapacity = rl.capacity ?? defaultRefill
+            const perTool = rl.perTool ?? {}
+
+            if (Object.keys(perTool).length === 0) {
+                // No per-tool config — simple case, one bucket config.
+                this.rateLimiter = tokenBucketLimiter({
+                    refillPerMinute: defaultRefill,
+                    capacity: defaultCapacity,
+                })
+            } else {
+                // Build per-tool limiters for tools with overrides, and a
+                // default limiter for everything else. Compose them behind
+                // the RateLimiter interface so the call site doesn't care.
+                const toolLimiters = new Map<string, RateLimiter>()
+                for (const [toolName, cfg] of Object.entries(perTool)) {
+                    toolLimiters.set(
+                        toolName,
+                        tokenBucketLimiter({
+                            refillPerMinute: cfg.refillPerMinute ?? defaultRefill,
+                            capacity: cfg.capacity ?? (cfg.refillPerMinute ?? defaultRefill),
+                        })
+                    )
+                }
+                const fallback = tokenBucketLimiter({
+                    refillPerMinute: defaultRefill,
+                    capacity: defaultCapacity,
+                })
+                this.rateLimiter = {
+                    async consume(key: string) {
+                        const limiter = toolLimiters.get(key) ?? fallback
+                        return limiter.consume(key)
+                    },
+                    async reset(key: string) {
+                        const limiter = toolLimiters.get(key) ?? fallback
+                        return limiter.reset?.(key)
+                    },
+                }
+            }
         }
         this.rateLimitKeyExtractor =
             rl.keyExtractor ?? ((toolName) => toolName)
@@ -738,7 +783,13 @@ export class PaidMcpServer {
             )
             let outcome: Awaited<ReturnType<typeof redeem>>
             try {
-                outcome = await redeem(this.accessKeyStore, incomingKey, tool.name)
+                // Extract the client fingerprint from the request
+                // metadata when binding is enabled. The client SDK
+                // includes its wallet address automatically.
+                const fingerprint = this.accessKeyBinding === 'wallet'
+                    ? readAccessKeyFingerprint(extra)
+                    : undefined
+                outcome = await redeem(this.accessKeyStore, incomingKey, tool.name, fingerprint)
                 redeemSpan.setAttribute(
                     'mppmcp.access-key.outcome',
                     outcome.ok ? 'ok' : outcome.reason
@@ -814,6 +865,12 @@ export class PaidMcpServer {
         const record = issueRecord({
             toolName: tool.name,
             pricing,
+            // When binding is enabled, lock the key to the wallet
+            // that just paid. Extract the address from the credential
+            // the client submitted during the charge flow.
+            ...(this.accessKeyBinding === 'wallet' && {
+                boundTo: readPayerAddress(extra),
+            }),
         })
         await storeRecord(this.accessKeyStore, record)
         this.stats.accessKeysIssued++
@@ -1295,6 +1352,46 @@ function readErrorCode(err: unknown): string | undefined {
     if (typeof err !== 'object' || err === null) return undefined
     const candidate = (err as { code?: unknown }).code
     return typeof candidate === 'string' ? candidate : undefined
+}
+
+/**
+ * @internal Read the client's wallet fingerprint from the request
+ * metadata. The client SDK attaches its address at the well-known
+ * key `ACCESS_KEY_FINGERPRINT_META` on every access-key redemption
+ * when the server advertises binding support.
+ */
+function readAccessKeyFingerprint(
+    extra: Record<string, unknown> & { _meta?: Record<string, unknown> }
+): string | undefined {
+    const meta = extra._meta
+    if (!meta) return undefined
+    const fp = meta[ACCESS_KEY_FINGERPRINT_META]
+    return typeof fp === 'string' ? fp : undefined
+}
+
+/**
+ * @internal Extract the payer's wallet address from the payment
+ * credential attached to the MCP request. The credential is placed
+ * at `_meta['org.paymentauth/credential']` by the mppx/mcp-sdk
+ * transport layer. The `from` field contains the signing address.
+ *
+ * Returns `undefined` if the address can't be extracted — the
+ * binding will still succeed (the key will be issued without a
+ * bound address), which is a graceful degradation rather than
+ * a hard failure.
+ */
+function readPayerAddress(
+    extra: Record<string, unknown> & { _meta?: Record<string, unknown> }
+): string | undefined {
+    const meta = extra._meta
+    if (!meta) return undefined
+    const credential = meta['org.paymentauth/credential'] as
+        | { payload?: { from?: string }; from?: string }
+        | undefined
+    if (!credential) return undefined
+    // mppx places the sender address either at credential.from
+    // or credential.payload.from depending on the intent shape.
+    return credential.from ?? credential.payload?.from ?? undefined
 }
 
 /**

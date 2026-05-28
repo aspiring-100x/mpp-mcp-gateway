@@ -183,6 +183,21 @@ export interface PaidMcpServerConfig {
      */
     accessKeyStore?: unknown
     /**
+     * Access-key binding mode. Controls whether issued access keys are
+     * bound to the paying client's identity, preventing replay attacks
+     * if a key is intercepted on an unencrypted transport.
+     *
+     * - `'none'` (default) — keys are bearer tokens; any presenter is
+     *   authorized. Simplest, backward-compatible.
+     * - `'wallet'` — keys are bound to the wallet address that paid the
+     *   upfront fee. Subsequent redemption requests must carry the same
+     *   wallet address in `_meta['org.mppmcp/access-key-fingerprint']`.
+     *   The client SDK handles this automatically.
+     *
+     * @default 'none'
+     */
+    accessKeyBinding?: 'none' | 'wallet'
+    /**
      * Maximum number of recent calls to retain in the call-log ring buffer.
      * The dashboard's `/api/calls` endpoint pulls from this buffer.
      * Set to `0` to disable per-call logging entirely.
@@ -278,6 +293,34 @@ export interface PaidMcpServerConfig {
             toolName: string,
             extra: Record<string, unknown>
         ) => string
+        /**
+         * Per-tool rate limit overrides. Keys are tool names; values
+         * specify `refillPerMinute` and/or `capacity` for that specific
+         * tool. Tools not listed here fall back to the server-wide
+         * `refillPerMinute` and `capacity`. Ignored when a custom
+         * `limiter` is provided (since the operator owns the entire
+         * rate-limit implementation in that case).
+         *
+         * Useful when an expensive tool ($10/call) needs a tighter
+         * limit than a cheap one ($0.001/call):
+         *
+         * @example
+         * ```ts
+         * rateLimit: {
+         *     refillPerMinute: 60,       // default: 60/min
+         *     perTool: {
+         *         'expensive_ai':  { refillPerMinute: 5, capacity: 2 },
+         *         'cheap_lookup':  { refillPerMinute: 600, capacity: 100 },
+         *     },
+         * }
+         * ```
+         */
+        perTool?: Record<string, {
+            /** Sustained refill rate for this tool, in tokens per minute. */
+            refillPerMinute?: number
+            /** Burst capacity for this tool. */
+            capacity?: number
+        }>
     }
     /**
      * Optional OpenTelemetry tracer. When provided, the gateway
@@ -349,6 +392,22 @@ export interface PaidMcpClientConfig {
      * automatic redaction of sensitive fields.
      */
     logger?: Logger
+    /**
+     * Whether to verify session settlement transactions on-chain
+     * after `closeSession()` returns. When enabled, the client
+     * watches for the settlement tx confirmation on the escrow
+     * contract before marking the close as complete.
+     *
+     * - `true` — verify via RPC that the tx hash in the receipt is
+     *   confirmed and the escrow event matches the channel state.
+     *   Adds ~1-2s latency to `closeSession()` but provides
+     *   trustless guarantees.
+     * - `false` (default) — trust the server's receipt. Faster,
+     *   suitable for trusted server relationships.
+     *
+     * @default false
+     */
+    verifySettlement?: boolean
 }
 
 /** Runtime statistics for a paid MCP server. */

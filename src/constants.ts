@@ -42,3 +42,11 @@ export const DEFAULT_PORT = 3000
 
 /** MCP `_meta` key used to attach an access-key authorization token. */
 export const ACCESS_KEY_META = 'org.mppmcp/access-key'
+
+/**
+ * MCP `_meta` key used to carry the client's wallet fingerprint for
+ * access-key binding verification. When `accessKeyBinding: 'wallet'`
+ * is set on the server, the client must include this in every
+ * access-key redemption request.
+ */
+export const ACCESS_KEY_FINGERPRINT_META = 'org.mppmcp/access-key-fingerprint'

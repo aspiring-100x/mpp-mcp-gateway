@@ -206,6 +206,30 @@ export interface WebhookConfig {
      * supply a non-global fetch. Defaults to `globalThis.fetch`.
      */
     fetch?: typeof globalThis.fetch
+
+    /**
+     * Optional dead-letter callback invoked when an event exhausts its
+     * retry budget without successful delivery. Use this to persist
+     * dropped events to a durable backend (Postgres, SQS, Redis Streams)
+     * for later replay, or to raise an alert.
+     *
+     * The callback receives the original event and the last error
+     * encountered during delivery. It runs asynchronously and its
+     * completion is awaited — if it throws, the error is logged but
+     * the event is still considered dropped.
+     *
+     * @example
+     * ```ts
+     * webhooks: {
+     *     url: 'https://example.com/webhook',
+     *     secret: process.env.WEBHOOK_SECRET!,
+     *     onDrop: async (event, lastError) => {
+     *         await db.insert('webhook_dlq', { event, error: lastError, droppedAt: new Date() })
+     *     },
+     * }
+     * ```
+     */
+    onDrop?: (event: WebhookEvent, lastError: { status?: number; message: string }) => void | Promise<void>
 }
 
 // -------------------------------------------------------------------
@@ -226,6 +250,7 @@ export class WebhookDispatcher {
     private readonly timeoutMs: number
     private readonly fetchImpl: typeof globalThis.fetch
     private readonly logger: Logger
+    private readonly onDrop: WebhookConfig['onDrop']
 
     /**
      * Tracks in-flight deliveries so the server's graceful
@@ -249,6 +274,7 @@ export class WebhookDispatcher {
         this.timeoutMs = Math.max(100, config.timeoutMs ?? 5000)
         this.fetchImpl = config.fetch ?? globalThis.fetch.bind(globalThis)
         this.logger = logger.child({ component: 'webhooks' })
+        this.onDrop = config.onDrop
     }
 
     /**
@@ -361,7 +387,7 @@ export class WebhookDispatcher {
             }
         }
 
-        // All attempts failed. Log and drop.
+        // All attempts failed. Log and invoke the dead-letter callback.
         this.logger.error('webhook delivery failed', {
             eventId: event.id,
             type: event.type,
@@ -369,6 +395,20 @@ export class WebhookDispatcher {
             attempts: this.maxAttempts,
             ...(lastError ?? {}),
         })
+
+        // Dead-letter callback: give operators a chance to persist
+        // the dropped event for later replay or alerting.
+        if (this.onDrop && lastError) {
+            try {
+                await this.onDrop(event, lastError)
+            } catch (dlqErr) {
+                this.logger.error('onDrop callback threw', {
+                    eventId: event.id,
+                    type: event.type,
+                    error: dlqErr instanceof Error ? dlqErr.message : String(dlqErr),
+                })
+            }
+        }
     }
 
     /**
