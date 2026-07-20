@@ -238,6 +238,19 @@ export function formatMetrics(
         `mppmcp_sessions_closed_total ${stats.sessionsClosed}`
     )
 
+    // ---- Rejection counters ---------------------------------------
+    // Calls the gateway refused before running the handler. Useful for
+    // alerting on abusive traffic (rate limits) or stuck rollouts
+    // (shutdown rejections that never subside).
+    lines.push(
+        '# HELP mppmcp_rate_limited_total Calls rejected by the rate limiter before payment or handler logic.',
+        '# TYPE mppmcp_rate_limited_total counter',
+        `mppmcp_rate_limited_total ${stats.rateLimitedCalls}`,
+        '# HELP mppmcp_rejected_shutting_down_total Calls rejected because the gateway had begun shutting down.',
+        '# TYPE mppmcp_rejected_shutting_down_total counter',
+        `mppmcp_rejected_shutting_down_total ${stats.rejectedShuttingDown}`
+    )
+
     // ---- Uptime ---------------------------------------------------
     lines.push(
         '# HELP mppmcp_uptime_seconds Server uptime in seconds.',

@@ -430,8 +430,37 @@ export interface GatewayStats {
     accessKeysIssued: number
     /** Number of access keys revoked because they expired or hit their call cap. */
     accessKeysExpired: number
+    /**
+     * Number of calls rejected by the rate limiter before any payment or
+     * handler logic ran. Surfaced as `mppmcp_rate_limited_total` in metrics.
+     */
+    rateLimitedCalls: number
+    /**
+     * Number of calls rejected because the gateway had begun shutting down.
+     * Surfaced as `mppmcp_rejected_shutting_down_total` in metrics.
+     */
+    rejectedShuttingDown: number
     uptimeMs: number
     startedAt: string
+}
+
+/**
+ * A live access-key record as surfaced by the server's `/api/keys`
+ * endpoint and {@link "mpp-mcp-gateway".PaidMcpServer.listAccessKeys}.
+ */
+export interface AccessKeyListEntry {
+    /** Opaque access-key token. */
+    key: string
+    /** Tool the key authorizes. */
+    tool: string
+    /** ISO 8601 timestamp when the key was issued. */
+    issuedAt: string
+    /** ISO 8601 timestamp when the key expires, if `validFor` was set. */
+    expiresAt?: string
+    /** Calls remaining, if `maxCalls` was set. */
+    remainingCalls?: number
+    /** Wallet address the key is bound to, when `accessKeyBinding: 'wallet'`. */
+    boundTo?: string
 }
 
 /** A single entry in the server's recent-call log (used by the dashboard). */

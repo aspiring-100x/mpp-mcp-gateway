@@ -67,6 +67,7 @@ import {
 import { WebhookDispatcher } from './webhooks.js'
 import type {
     CallLogEntry,
+    AccessKeyListEntry,
     GatewayStats,
     PaidMcpServerConfig,
     PaidToolDefinition,
@@ -123,6 +124,17 @@ export class PaidMcpServer {
      * the paying client's address and can't be reused by another wallet.
      */
     private accessKeyBinding: 'none' | 'wallet'
+    /**
+     * In-process index of access-key tokens this server instance has
+     * issued. Used by {@link PaidMcpServer.listAccessKeys} to enumerate
+     * live keys — the {@link MppMcpStore} interface has no scan primitive,
+     * so we track tokens here as they're minted. This index is in-memory
+     * only: it does not survive a restart and, in multi-instance
+     * deployments, each instance sees only the keys it issued. Revocation
+     * ({@link PaidMcpServer.revokeAccessKey}) works against the shared
+     * store regardless of which instance issued the key.
+     */
+    private issuedKeyTokens: Set<string>
     /** Structured logger for runtime events. Never null after construction. */
     private logger: Logger
     /**
@@ -215,6 +227,7 @@ export class PaidMcpServer {
         //   3. Nothing passed → in-memory default with atomic update.
         this.accessKeyStore = resolveStore(config.accessKeyStore, this.logger)
         this.accessKeyBinding = config.accessKeyBinding ?? 'none'
+        this.issuedKeyTokens = new Set()
 
         this.callLogCapacity = Math.max(0, config.callLogSize ?? 1000)
         // Pre-allocate the ring buffer so `appendCall` never has to grow
@@ -261,6 +274,8 @@ export class PaidMcpServer {
             sessionsClosed: 0,
             accessKeysIssued: 0,
             accessKeysExpired: 0,
+            rateLimitedCalls: 0,
+            rejectedShuttingDown: 0,
             uptimeMs: 0,
             startedAt: new Date().toISOString(),
         }
@@ -352,6 +367,7 @@ export class PaidMcpServer {
             // This runs before any pricing or payment logic so a closing
             // gateway never issues a 402 it can't fulfill.
             if (this.shuttingDown) {
+                this.stats.rejectedShuttingDown++
                 throw new ShuttingDownError({ tool: tool.name })
             }
 
@@ -364,6 +380,7 @@ export class PaidMcpServer {
             const bucketKey = this.rateLimitKeyExtractor(tool.name, extra)
             const verdict = await this.rateLimiter.consume(bucketKey)
             if (!verdict.allowed) {
+                this.stats.rateLimitedCalls++
                 this.logger.warn('rate limit exceeded', {
                     tool: tool.name,
                     bucketKey,
@@ -873,6 +890,7 @@ export class PaidMcpServer {
             }),
         })
         await storeRecord(this.accessKeyStore, record)
+        this.issuedKeyTokens.add(record.key)
         this.stats.accessKeysIssued++
         rootSpan.setAttribute(TRACE_ATTRS.ACCESS_KEY_JUST_ISSUED, true)
 
@@ -987,6 +1005,75 @@ export class PaidMcpServer {
             cursor = (cursor - 1 + this.callLogCapacity) % this.callLogCapacity
         }
         return out
+    }
+
+    /**
+     * Enumerate the access keys this server instance has issued that are
+     * still present in the store. Each token is looked up live, so
+     * `remainingCalls` and `expiresAt` reflect current state. Tokens that
+     * have been swept from the store (deleted, TTL-expired) are pruned from
+     * the in-process index as a side effect.
+     *
+     * Powers the dashboard's `GET /api/keys` endpoint and the
+     * `mpp-mcp keys list` CLI command.
+     *
+     * Caveats: the index is in-memory and per-instance. A restart clears it,
+     * and in a multi-instance deployment each instance reports only the keys
+     * it minted. Sticky terminal records (expired / exhausted but not yet
+     * TTL-swept) are still reported — filter on `remainingCalls` / `expiresAt`
+     * if you only want redeemable keys.
+     */
+    async listAccessKeys(): Promise<AccessKeyListEntry[]> {
+        const out: AccessKeyListEntry[] = []
+        for (const token of this.issuedKeyTokens) {
+            const record = await this.accessKeyStore.get<AccessKeyRecord>(token)
+            if (!record) {
+                // Swept from the store — drop it from our index.
+                this.issuedKeyTokens.delete(token)
+                continue
+            }
+            out.push({
+                key: record.key,
+                tool: record.tool,
+                issuedAt: record.issuedAt,
+                ...(record.expiresAt !== null && { expiresAt: record.expiresAt }),
+                ...(record.remainingCalls !== null && {
+                    remainingCalls: record.remainingCalls,
+                }),
+                ...(record.boundTo && { boundTo: record.boundTo }),
+            })
+        }
+        return out
+    }
+
+    /**
+     * Revoke an access key by token, deleting it from the store so future
+     * redemptions fail with `unknown`. Works against the shared store
+     * regardless of which instance issued the key, so it functions in
+     * multi-instance deployments.
+     *
+     * Returns `{ revoked: true }` when a matching record was found and
+     * deleted, `{ revoked: false }` when no such key exists (already
+     * revoked, expired-and-swept, or never issued). Idempotent.
+     *
+     * Powers the dashboard's `DELETE /api/keys/:token` endpoint and the
+     * `mpp-mcp keys revoke` CLI command.
+     */
+    async revokeAccessKey(token: string): Promise<{ revoked: boolean }> {
+        const existing = await this.accessKeyStore.get<AccessKeyRecord>(token)
+        this.issuedKeyTokens.delete(token)
+        if (!existing) return { revoked: false }
+        await this.accessKeyStore.delete(token)
+        this.webhooks?.emit('access-key.expired', {
+            tool: existing.tool,
+            key: token,
+            reason: 'exhausted',
+        })
+        this.logger.info('access key revoked', {
+            tool: existing.tool,
+            key: token,
+        })
+        return { revoked: true }
     }
 
     /**

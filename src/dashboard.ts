@@ -53,6 +53,12 @@ export interface DashboardOptions {
  *   GET <prefix>/stats        →  { stats: GatewayStats }
  *   GET <prefix>/tools        →  { tools: [{ name, description, price, ... }] }
  *   GET <prefix>/calls?limit  →  { calls: CallLogEntry[] }   newest first
+ *   GET <prefix>/keys         →  { keys: AccessKeyListEntry[] }
+ *   DELETE <prefix>/keys/:token →  { revoked: boolean }
+ *
+ * The `GET` routes are read-only. `DELETE /keys/:token` mutates state
+ * (revokes an access key) — protect it with the `middleware` option in
+ * production. All routes share the same `middleware`.
  *
  * The function returns the Express app for chaining.
  */
@@ -76,6 +82,15 @@ export function mountDashboard(
         get(full, ...middleware, handler)
     }
 
+    const routeDelete = (path: string, handler: RequestHandler) => {
+        const full = `${prefix}${path}`
+        const del = app.delete.bind(app) as (
+            path: string,
+            ...handlers: RequestHandler[]
+        ) => unknown
+        del(full, ...middleware, handler)
+    }
+
     route('/stats', (_req, res) => {
         res.json({ stats: server.getStats() })
     })
@@ -95,6 +110,45 @@ export function mountDashboard(
         const requested = parseLimit(req)
         const calls = server.getRecentCalls(requested)
         res.json({ calls })
+    })
+
+    // List live access keys issued by this server instance.
+    route('/keys', (_req, res) => {
+        server
+            .listAccessKeys()
+            .then((keys) => res.json({ keys }))
+            .catch((err: unknown) => {
+                res.status(500).json({
+                    error: 'internal',
+                    message: err instanceof Error ? err.message : String(err),
+                })
+            })
+    })
+
+    // Revoke an access key by token. Mutating — protect with the
+    // `middleware` option in production.
+    routeDelete('/keys/:token', (req, res) => {
+        const raw = (req.params as Record<string, string | string[]>).token
+        const token = Array.isArray(raw) ? raw[0] : raw
+        if (!token) {
+            res.status(400).json({ error: 'invalid-input', message: 'Missing key token' })
+            return
+        }
+        server
+            .revokeAccessKey(token)
+            .then((result) => {
+                if (result.revoked) {
+                    res.json(result)
+                } else {
+                    res.status(404).json({ ...result, error: 'not-found' })
+                }
+            })
+            .catch((err: unknown) => {
+                res.status(500).json({
+                    error: 'internal',
+                    message: err instanceof Error ? err.message : String(err),
+                })
+            })
     })
 
     return app

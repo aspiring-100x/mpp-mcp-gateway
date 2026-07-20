@@ -1,6 +1,6 @@
 {
     "name": "mpp-mcp-gateway",
-    "version": "0.1.0",
+    "version": "0.5.0",
     "description": "Monetize any MCP server with stablecoin micropayments via MPP on Tempo",
     "type": "module",
     "main": "dist/index.js",

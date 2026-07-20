@@ -12,8 +12,8 @@
  *   npx mpp-mcp stats <url>                      # gateway stats only
  *   npx mpp-mcp tools <url>                      # list tools and prices
  *   npx mpp-mcp calls <url> [--limit=N]          # recent call log
- *   npx mpp-mcp keys list <url>                  # list access keys (via calls)
- *   npx mpp-mcp keys revoke <token> <url>        # placeholder — revoke endpoint TBD
+ *   npx mpp-mcp keys list <url>                  # list live access keys
+ *   npx mpp-mcp keys revoke <token> <url>        # revoke an access key
  *
  * Authentication:
  *   --token=<bearer>    Bearer token for protected endpoints
@@ -82,12 +82,30 @@ async function fetchJson<T>(url: string, headers: Record<string, string>): Promi
     return res.json() as Promise<T>
 }
 
+async function deleteJson<T>(url: string, headers: Record<string, string>): Promise<{ status: number; body: T }> {
+    const res = await fetch(url, { method: 'DELETE', headers })
+    const body = (await res.json().catch(() => ({}))) as T
+    return { status: res.status, body }
+}
+
 function resolveUrl(positional: string[], subcommand?: string): string {
     // Find the first positional that looks like a URL
     for (const p of positional.slice(subcommand ? 2 : 1)) {
         if (p.startsWith('http://') || p.startsWith('https://')) return p.replace(/\/$/, '')
     }
     throw new Error('Missing URL argument. Usage: npx mpp-mcp <command> <url>')
+}
+
+/**
+ * Extract the first non-URL positional after a subcommand — used for
+ * `keys revoke <token> <url>` to pull the token out regardless of
+ * argument order.
+ */
+function resolveToken(positional: string[]): string | undefined {
+    for (const p of positional.slice(2)) {
+        if (!p.startsWith('http://') && !p.startsWith('https://')) return p
+    }
+    return undefined
 }
 
 // ─── Formatters ─────────────────────────────────────────────────────
@@ -229,8 +247,40 @@ async function cmdCalls(url: string, headers: Record<string, string>, limit: num
 }
 
 async function cmdKeysList(url: string, headers: Record<string, string>): Promise<void> {
-    // Access keys are embedded in call log entries when `accessKeyJustIssued` is true.
-    // This is the best we can do without a dedicated key-list endpoint.
+    // Prefer the dedicated /api/keys endpoint. Fall back to deriving
+    // issuances from the call log if the gateway predates that endpoint.
+    let keys: Array<Record<string, unknown>> | undefined
+    try {
+        const res = await fetchJson<{ keys: Array<Record<string, unknown>> }>(
+            `${url}/api/keys`,
+            headers
+        )
+        keys = res.keys
+    } catch {
+        keys = undefined
+    }
+
+    if (keys) {
+        const lines: string[] = ['', '  Access Keys', '  ───────────']
+        if (keys.length === 0) {
+            lines.push('  (no live access keys)')
+        } else {
+            for (const k of keys) {
+                const tool = String(k.tool ?? '').padEnd(20)
+                const remaining =
+                    k.remainingCalls !== undefined ? `${k.remainingCalls} calls` : 'unlimited'
+                const expires = k.expiresAt ? ` exp ${String(k.expiresAt).slice(0, 19)}` : ''
+                lines.push(`  ${String(k.key)}`)
+                lines.push(`    ${tool} ${remaining}${expires}`)
+            }
+        }
+        console.log(lines.join('\n'))
+        console.log('')
+        return
+    }
+
+    // Legacy fallback: access keys are embedded in call log entries when
+    // `accessKeyJustIssued` is true.
     const { calls } = await fetchJson<{ calls: Array<Record<string, unknown>> }>(
         `${url}/api/calls?limit=1000`,
         headers
@@ -251,6 +301,28 @@ async function cmdKeysList(url: string, headers: Record<string, string>): Promis
     console.log('')
 }
 
+async function cmdKeysRevoke(
+    token: string,
+    url: string,
+    headers: Record<string, string>
+): Promise<void> {
+    const { status, body } = await deleteJson<{ revoked?: boolean; message?: string }>(
+        `${url}/api/keys/${encodeURIComponent(token)}`,
+        headers
+    )
+    if (status === 200 && body.revoked) {
+        console.log(`\n  ✓ Revoked access key: ${token}\n`)
+    } else if (status === 404) {
+        console.log(`\n  Key not found (already revoked, expired, or never issued): ${token}\n`)
+    } else if (status === 401 || status === 403) {
+        console.error(`\n  ✗ Unauthorized. Supply --token=<bearer> or --header=<k:v>.\n`)
+        process.exit(1)
+    } else {
+        console.error(`\n  ✗ Revoke failed (HTTP ${status}): ${body.message ?? 'unknown error'}\n`)
+        process.exit(1)
+    }
+}
+
 function printUsage(): void {
     console.log(`
   mpp-mcp-gateway CLI — inspect and manage deployed gateways
@@ -263,7 +335,8 @@ function printUsage(): void {
     stats <url>                Show gateway statistics
     tools <url>                List registered tools and prices
     calls <url> [--limit=N]   Show recent call log (default: 100)
-    keys list <url>            Show access-key issuances from call log
+    keys list <url>            Show live access keys
+    keys revoke <token> <url>  Revoke an access key by token
 
   Options:
     --token=<bearer>           Bearer token for authenticated endpoints
@@ -318,8 +391,13 @@ async function main(): Promise<void> {
                     const url = resolveUrl(positional, subcommand)
                     await cmdKeysList(url, headers)
                 } else if (subcommand === 'revoke') {
-                    console.log('\n  keys revoke is not yet implemented.')
-                    console.log('  A dedicated /api/keys endpoint is planned for v1.0.\n')
+                    const token = resolveToken(positional)
+                    if (!token) {
+                        console.error('  Missing token. Usage: npx mpp-mcp keys revoke <token> <url>')
+                        process.exit(1)
+                    }
+                    const url = resolveUrl(positional, subcommand)
+                    await cmdKeysRevoke(token, url, headers)
                 } else {
                     console.error(`  Unknown subcommand: keys ${subcommand ?? ''}`)
                     console.error('  Available: keys list, keys revoke')

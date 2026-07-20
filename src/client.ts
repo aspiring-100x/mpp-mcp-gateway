@@ -70,6 +70,14 @@ export class PaidMcpClient {
     private maxSessionDepositUnits: bigint
     private totalSpentUnits: bigint = 0n
     private cumulativeVoucher = 0
+    /**
+     * Count of calls aborted locally because they would have exceeded a
+     * configured cap (per-call, total, or session deposit). Surfaced via
+     * {@link PaidMcpClient.getSpending} as `capExceeded`. Caps are enforced
+     * client-side before any signing, so this counter has no server-side
+     * equivalent in the `/metrics` endpoint.
+     */
+    private capExceededCount = 0
     /** Whether to verify settlement tx on-chain after closeSession. */
     private verifySettlement: boolean
     /** Client's own wallet address, derived from privateKey. Used for access-key fingerprinting. */
@@ -330,6 +338,7 @@ export class PaidMcpClient {
         if (isSession) {
             const suggestedUnits = parseSuggestedDepositUnits(c)
             if (suggestedUnits > this.maxSessionDepositUnits) {
+                this.capExceededCount++
                 throw new SessionDepositCapExceededError({
                     suggested: bigintToFloat(suggestedUnits),
                     limit: bigintToFloat(this.maxSessionDepositUnits),
@@ -338,6 +347,7 @@ export class PaidMcpClient {
         }
 
         if (requestedUnits > this.maxPerCallUnits) {
+            this.capExceededCount++
             throw new SpendingCapExceededError({
                 kind: 'per-call',
                 requested: bigintToFloat(requestedUnits),
@@ -345,6 +355,7 @@ export class PaidMcpClient {
             })
         }
         if (this.totalSpentUnits + requestedUnits > this.maxTotalUnits) {
+            this.capExceededCount++
             throw new SpendingCapExceededError({
                 kind: 'total',
                 requested: bigintToFloat(requestedUnits),
@@ -373,6 +384,7 @@ export class PaidMcpClient {
         maxPerCall: number
         maxSessionDeposit: number
         cumulativeVoucher: number
+        capExceeded: number
     } {
         return {
             totalSpent: bigintToFloat(this.totalSpentUnits),
@@ -381,6 +393,7 @@ export class PaidMcpClient {
             maxPerCall: bigintToFloat(this.maxPerCallUnits),
             maxSessionDeposit: bigintToFloat(this.maxSessionDepositUnits),
             cumulativeVoucher: this.cumulativeVoucher,
+            capExceeded: this.capExceededCount,
         }
     }
 
@@ -388,6 +401,7 @@ export class PaidMcpClient {
     resetSpending(): void {
         this.totalSpentUnits = 0n
         this.cumulativeVoucher = 0
+        this.capExceededCount = 0
     }
 
     /**

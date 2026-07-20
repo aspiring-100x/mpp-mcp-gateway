@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Access-key management API** — `PaidMcpServer.listAccessKeys()` and `PaidMcpServer.revokeAccessKey(token)`. Dashboard exposes `GET /api/keys` and `DELETE /api/keys/:token`. The `mpp-mcp keys revoke <token> <url>` CLI command is now implemented (previously a placeholder), and `mpp-mcp keys list` reads the dedicated `/api/keys` endpoint (falling back to call-log derivation for older gateways).
+- **`AccessKeyListEntry` type** — exported from the barrel; the wire shape for `/api/keys` and `listAccessKeys()`.
+- **Rejection metrics** — `mppmcp_rate_limited_total` and `mppmcp_rejected_shutting_down_total` counters on the `/metrics` endpoint, backed by new `GatewayStats.rateLimitedCalls` and `GatewayStats.rejectedShuttingDown` fields.
+- **Client cap-exceeded counter** — `PaidMcpClient.getSpending()` now returns `capExceeded`, the count of calls aborted locally by a spending cap (per-call, total, or session deposit).
 - API stability document (`docs/api-stability.md`) classifying all exports as stable, experimental, or internal.
 - `@internal` JSDoc annotations on runtime utility exports (`randomHex`, `writeLogLine`, `isNodeRuntime`).
 - `@experimental` annotation on `CLOUDFLARE_KV_SESSION_WARNING`.

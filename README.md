@@ -282,6 +282,10 @@ server.getInFlightCount()   // currently active handlers
 server.isShuttingDown()     // true after close() begins
 server.describe()           // full descriptor for discovery/OpenAPI
 
+// Access-key management
+await server.listAccessKeys()          // live keys issued by this instance
+await server.revokeAccessKey(token)    // { revoked: boolean }
+
 // Graceful shutdown
 await server.close({ timeoutMs: 25_000 })
 ```
@@ -459,6 +463,8 @@ Exposes:
 | `GET /api/stats` | `{ stats: GatewayStats }` — calls, revenue, sessions, keys, uptime |
 | `GET /api/tools` | `{ tools: [{ name, description, price }] }` |
 | `GET /api/calls?limit=N` | `{ calls: CallLogEntry[] }` — newest first |
+| `GET /api/keys` | `{ keys: AccessKeyListEntry[] }` — live access keys |
+| `DELETE /api/keys/:token` | `{ revoked: boolean }` — revoke a key (mutating; protect with middleware) |
 
 ### Prometheus Metrics
 
@@ -478,6 +484,8 @@ Exposed metrics:
 - `mppmcp_in_flight_calls` — gauge of active handlers
 - `mppmcp_access_keys_issued_total` / `expired_total`
 - `mppmcp_sessions_opened_total` / `closed_total`
+- `mppmcp_rate_limited_total` — calls rejected by the rate limiter
+- `mppmcp_rejected_shutting_down_total` — calls rejected during shutdown
 - `mppmcp_uptime_seconds`
 - `mppmcp_shutting_down`
 
@@ -580,6 +588,7 @@ npx mpp-mcp stats https://api.example.com
 npx mpp-mcp tools https://api.example.com
 npx mpp-mcp calls https://api.example.com --limit=50
 npx mpp-mcp keys list https://api.example.com --token=admin
+npx mpp-mcp keys revoke mppmcp_abc123... https://api.example.com --token=admin
 ```
 
 ## Configuration Reference
