@@ -20,10 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `@experimental` annotation on `CLOUDFLARE_KV_SESSION_WARNING`.
 
 ### Changed
-- Upgraded `mppx` from deprecated `0.1.1` to `0.4.11` or newer. Session-priced servers now require `sessionAccountKey` so mppx can sign channel settlement, and use the current Tempo escrow contracts.
+- **BREAKING:** Upgraded `mppx` from deprecated `0.1.1` to `0.4.11` or newer. Session-priced servers now require a separate `sessionAccountKey` so mppx can sign channel settlement, while `feePayerKey` retains its fee-sponsorship semantics. The gateway now uses the current Tempo escrow contracts.
 
 ### Security
-- Removed the vulnerable `mppx` range affected by payment-bypass and session-voucher advisories.
+- Removed the vulnerable `mppx` range affected by the critical payment-bypass advisory GHSA-8x4m-qw58-3pcx, Stripe replay advisory GHSA-8mhj-rffc-rcvw, and Tempo session-voucher advisory GHSA-mv9j-8jvg-j8mr.
 
 ---
 
