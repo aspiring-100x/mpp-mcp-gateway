@@ -34,12 +34,39 @@ afterEach(async () => {
 })
 
 describe('session pricing', () => {
+    it('requires an operator key for channel settlement', () => {
+        expect(() =>
+            createPaidMcpServer({
+                name: 'missing-session-key',
+                version: '0.0.0',
+                recipient: RECIPIENT,
+                secretKey: SECRET,
+                tools: [
+                    {
+                        name: 'streamy',
+                        description: 'Pay per second.',
+                        inputSchema: {},
+                        pricing: {
+                            type: 'session',
+                            amount: '0.0001',
+                            unitType: 'second',
+                        },
+                        handler: async () => ({
+                            content: [{ type: 'text', text: 'ok' }],
+                        }),
+                    },
+                ],
+            })
+        ).toThrow(/sessionAccountKey is required/)
+    })
+
     it('reports the per-unit price for a session-priced tool', () => {
         const server = createPaidMcpServer({
             name: 'session-price-server',
             version: '0.0.0',
             recipient: RECIPIENT,
             secretKey: SECRET,
+            sessionAccountKey: TEST_AGENT_KEY,
             tools: [
                 {
                     name: 'streamy',
@@ -66,6 +93,7 @@ describe('session pricing', () => {
             version: '0.0.0',
             recipient: RECIPIENT,
             secretKey: SECRET,
+            sessionAccountKey: TEST_AGENT_KEY,
             tools: [
                 {
                     name: 's',
@@ -89,6 +117,7 @@ describe('session pricing', () => {
             version: '0.0.0',
             recipient: RECIPIENT,
             secretKey: SECRET,
+            sessionAccountKey: TEST_AGENT_KEY,
             tools: [
                 {
                     name: 'one-shot',

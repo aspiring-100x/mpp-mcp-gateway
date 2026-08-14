@@ -19,11 +19,16 @@ Result: open + close are on-chain (~1s each); everything in between is sub-100ms
 
 ```bash
 # Terminal 1
+export SERVER_PRIVATE_KEY=0xOperatorKey
 npm run example:streaming:server
 
 # Terminal 2
 npm run example:streaming:client
 ```
+
+The server key is required only for session pricing. The current mppx session
+method uses it to submit the highest voucher when the channel closes; use an
+operator-controlled Tempo account and keep the key outside source control.
 
 The client will:
 

@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { buildOpenApi } from '../src/discovery.js'
 import { createPaidMcpServer } from '../src/server.js'
 import { TESTNET_TOKENS } from '../src/constants.js'
+import { TEST_AGENT_KEY } from './helpers.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
 const SECRET = 'multi-currency-test-secret'
@@ -102,6 +103,7 @@ describe('multi-currency discovery offers', () => {
             version: '1.0.0',
             recipient: RECIPIENT,
             secretKey: SECRET,
+            sessionAccountKey: TEST_AGENT_KEY,
             tools: [
                 {
                     name: 'stream',

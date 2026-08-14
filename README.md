@@ -605,6 +605,7 @@ npx mpp-mcp keys revoke mppmcp_abc123... https://api.example.com --token=admin
 | `currency` | `0x${string}` | pathUSD | TIP-20 stablecoin contract address |
 | `network` | `'mainnet' \| 'testnet'` | `'testnet'` | Tempo network |
 | `feePayerKey` | `0x${string}` | — | Server-sponsored gas (fee payer private key) |
+| `sessionAccountKey` | `0x${string}` | — | Operator key required for session settlement |
 | `escrowContract` | `0x${string}` | per-network default | Session escrow contract |
 | `accessKeyStore` | `MppMcpStore` | in-memory | Persistence for access keys |
 | `sessionStore` | `MppMcpStore` | in-memory | Persistence for session channels |
@@ -642,6 +643,7 @@ npx mpp-mcp keys revoke mppmcp_abc123... https://api.example.com --token=admin
 | `paid-weather-dashboard` | per-call + access-key | Streamable HTTP | Combined MCP + dashboard + discovery |
 | `paid-streaming-mcp` | session | stdio | Payment channels, vouchers, close |
 | `paid-subscription-mcp` | access-key | stdio | Day pass, time-only, call packs |
+| `paid-peer-cash-mcp` | per-call | stdio | Gate Peer Cash tools, then cash out MPP revenue |
 
 Run any example:
 
@@ -662,13 +664,17 @@ npm run example:streaming:client
 npm run example:subscription:server
 npm run example:subscription:client
 
+# Node.js 22+, Tempo mainnet
+npm run example:peer-cash:server
+
 # Dashboard (with all endpoints)
 npm run example:dashboard:server
 ```
 
 ### Funding a Test Wallet
 
-Paid examples require a funded wallet on Tempo testnet:
+Paid examples require a funded wallet on Tempo testnet. The Peer Cash example
+is the exception: it uses Tempo mainnet because the revenue route is live-only.
 
 ```bash
 cast rpc tempo_fundAddress 0xYourAddress --rpc-url https://rpc.moderato.tempo.xyz

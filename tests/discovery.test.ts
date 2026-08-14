@@ -12,6 +12,7 @@ import { z } from 'zod'
 
 import { buildOpenApi, mountDiscovery } from '../src/discovery.js'
 import { createPaidMcpServer } from '../src/server.js'
+import { TEST_AGENT_KEY } from './helpers.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
 const SECRET = 'discovery-test-secret'
@@ -140,6 +141,7 @@ describe('buildOpenApi', () => {
             version: '0',
             recipient: RECIPIENT,
             secretKey: SECRET,
+            sessionAccountKey: TEST_AGENT_KEY,
             tools: [
                 {
                     name: 'streamy',
