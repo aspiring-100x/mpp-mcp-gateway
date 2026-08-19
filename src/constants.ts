@@ -33,9 +33,9 @@ export const DEFAULT_CURRENCY = TESTNET_TOKENS.pathUSD
 
 /** Tempo escrow contract addresses (used for session-priced tools). */
 export const TEMPO_ESCROW_TESTNET =
-    '0x542831e3E4Ace07559b7C8787395f4Fb99F70787' as `0x${string}`
+    '0xe1c4d3dce17bc111181ddf716f75bae49e61a336' as `0x${string}`
 export const TEMPO_ESCROW_MAINNET =
-    '0x0901aED692C755b870F9605E56BAA66C35BEfF69' as `0x${string}`
+    '0x33b901018174DDabE4841042ab76ba85D4e24f25' as `0x${string}`
 
 /** Default gateway port */
 export const DEFAULT_PORT = 3000

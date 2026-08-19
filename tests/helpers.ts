@@ -59,6 +59,9 @@ export async function makeConnectedPair(
         // that explicitly want to exercise rate limiting can override
         // via serverConfig.
         rateLimit: { enabled: false },
+        ...(opts.tools.some((tool) => tool.pricing?.type === 'session')
+            ? { sessionAccountKey: TEST_AGENT_KEY }
+            : {}),
         ...opts.serverConfig,
     })
 

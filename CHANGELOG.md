@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Paid Peer Cash MCP example** — gates selected `peer-cash-mcp` tools with Tempo MPP payments, routes settled pathUSD revenue to Base USDC, and stops at an unsigned Peer Cash transaction plan.
 - **Access-key management API** — `PaidMcpServer.listAccessKeys()` and `PaidMcpServer.revokeAccessKey(token)`. Dashboard exposes `GET /api/keys` and `DELETE /api/keys/:token`. The `mpp-mcp keys revoke <token> <url>` CLI command is now implemented (previously a placeholder), and `mpp-mcp keys list` reads the dedicated `/api/keys` endpoint (falling back to call-log derivation for older gateways).
 - **`AccessKeyListEntry` type** — exported from the barrel; the wire shape for `/api/keys` and `listAccessKeys()`.
 - **Rejection metrics** — `mppmcp_rate_limited_total` and `mppmcp_rejected_shutting_down_total` counters on the `/metrics` endpoint, backed by new `GatewayStats.rateLimitedCalls` and `GatewayStats.rejectedShuttingDown` fields.
@@ -17,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - API stability document (`docs/api-stability.md`) classifying all exports as stable, experimental, or internal.
 - `@internal` JSDoc annotations on runtime utility exports (`randomHex`, `writeLogLine`, `isNodeRuntime`).
 - `@experimental` annotation on `CLOUDFLARE_KV_SESSION_WARNING`.
+
+### Changed
+- **BREAKING:** Upgraded `mppx` from deprecated `0.1.1` to `0.4.11` or newer. Session-priced servers now require a separate `sessionAccountKey` so mppx can sign channel settlement, while `feePayerKey` retains its fee-sponsorship semantics. The gateway now uses the current Tempo escrow contracts.
+
+### Security
+- Removed the vulnerable `mppx` range affected by the critical payment-bypass advisory GHSA-8x4m-qw58-3pcx, Stripe replay advisory GHSA-8mhj-rffc-rcvw, and Tempo session-voucher advisory GHSA-mv9j-8jvg-j8mr.
 
 ---
 

@@ -1310,17 +1310,29 @@ function createMppxPayment(
 
     // tempo() with sessions enabled needs a Store and an escrow contract.
     // Without sessions we can keep things minimal — just charge.
-    const tempoParams: Parameters<typeof tempo>[0] = {
+    const chargeParams: Parameters<typeof tempo.charge>[0] = {
         currency: config.currency,
         recipient: config.recipient,
         testnet: config.network === 'testnet',
     }
 
-    if (config.feePayerKey) {
-        tempoParams.feePayer = privateKeyToAccount(config.feePayerKey)
-    }
+    const feePayerAccount = config.feePayerKey
+        ? privateKeyToAccount(config.feePayerKey)
+        : undefined
+    const sessionAccount = config.sessionAccountKey
+        ? privateKeyToAccount(config.sessionAccountKey)
+        : undefined
+
+    if (feePayerAccount) chargeParams.feePayer = feePayerAccount
+
+    let sessionMethod: ReturnType<typeof tempo.session> | undefined
 
     if (useSessions) {
+        if (!sessionAccount) {
+            throw new Error(
+                'sessionAccountKey is required when any tool uses session pricing; mppx needs the operator account to settle the channel on Tempo'
+            )
+        }
         const escrow =
             config.escrowContract ??
             (config.network === 'mainnet' ? TEMPO_ESCROW_MAINNET : TEMPO_ESCROW_TESTNET)
@@ -1331,16 +1343,26 @@ function createMppxPayment(
         // three forms is structurally compatible.
         const store = resolveStore(config.sessionStore, logger)
 
-            ; (tempoParams as Record<string, unknown>).escrowContract = escrow
-            ; (tempoParams as Record<string, unknown>).store = store
-            ; (tempoParams as Record<string, unknown>).stream = false
-        // ^ stream:false → use the standard request/response session intent
+        const sessionParams: Parameters<typeof tempo.session>[0] = {
+            account: sessionAccount,
+            currency: config.currency,
+            recipient: config.recipient,
+            testnet: config.network === 'testnet',
+            ...(feePayerAccount ? { feePayer: feePayerAccount } : {}),
+            escrowContract: escrow,
+            store,
+            sse: false,
+        }
+        sessionMethod = tempo.session(sessionParams)
+        // ^ sse:false → use the standard request/response session intent
         //   instead of the SSE long-poll variant. MCP tool calls are
         //   request/response, so this is the right shape.
     }
 
     return Mppx.create({
-        methods: [tempo(tempoParams)],
+        methods: useSessions
+            ? [tempo.charge(chargeParams), sessionMethod!]
+            : [tempo.charge(chargeParams)],
         realm: config.name,
         secretKey: config.secretKey,
         transport: Transport.mcpSdk(),

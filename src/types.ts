@@ -164,6 +164,12 @@ export interface PaidMcpServerConfig {
      */
     feePayerKey?: `0x${string}`
     /**
+     * Operator key used to close and settle Tempo payment channels. Required
+     * when any tool uses session pricing. It may control a different account
+     * from the wallet configured as `recipient`.
+     */
+    sessionAccountKey?: `0x${string}`
+    /**
      * Escrow contract address for session pricing. Required only if any tool
      * uses `pricing.type === 'session'`. Falls back to mppx's per-network
      * defaults (`TEMPO_ESCROW_*` in `constants.ts`) when omitted.
