@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+---
+
+## [0.6.0] - 2026-08-20
+
+Minor bump rather than a patch: this release carries a breaking configuration
+change for session-priced servers (see **Changed**), and enabling
+`accessKeyBinding: 'wallet'` now invalidates unbound keys already sitting in
+the access-key store (see **Security**).
+
 ### Added
 - **Paid Peer Cash MCP example** — gates selected `peer-cash-mcp` tools with Tempo MPP payments, routes settled pathUSD revenue to Base USDC, and stops at an unsigned Peer Cash transaction plan.
 - **Access-key management API** — `PaidMcpServer.listAccessKeys()` and `PaidMcpServer.revokeAccessKey(token)`. Dashboard exposes `GET /api/keys` and `DELETE /api/keys/:token`. The `mpp-mcp keys revoke <token> <url>` CLI command is now implemented (previously a placeholder), and `mpp-mcp keys list` reads the dedicated `/api/keys` endpoint (falling back to call-log derivation for older gateways).
