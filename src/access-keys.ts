@@ -12,6 +12,15 @@
  *
  * Wire format on subsequent calls:
  *   - Client request `_meta[ACCESS_KEY_META] = key` — just the opaque string
+ *   - Under `accessKeyBinding: 'wallet'`, also
+ *     `_meta[ACCESS_KEY_FINGERPRINT_META] = <wallet address>`
+ *
+ * Binding fails closed in both directions. `issueRecord` refuses to mint
+ * a record when binding is on but no payer address is known, and
+ * `redeem` refuses a record that carries no binding when the server
+ * requires one. Neither path degrades to a bearer token, because a
+ * bearer token is exactly what an attacker who intercepted the key
+ * needs.
  *
  * Storage uses {@link MppMcpStore}, a small four-method interface with
  * three native adapters (memory, Upstash, Cloudflare KV) and a bridge
@@ -45,16 +54,42 @@ export interface AccessKeyRecord {
     /** Tx hash of the original payment, for auditing. */
     paymentReference?: string
     /**
-     * Wallet address of the client that paid for this key. When set,
-     * only requests whose `_meta` carries a matching fingerprint are
-     * authorized — prevents stolen keys from being replayed by a
-     * different agent.
+     * Wallet address of the client that paid for this key, lowercased.
+     * When set, only requests whose `_meta` carries a matching
+     * fingerprint are authorized — prevents stolen keys from being
+     * replayed by a different agent.
      *
-     * Set via `PaidMcpServerConfig.accessKeyBinding: 'wallet'`.
-     * When binding is `'none'` (the default for backward compat),
-     * this field is `undefined` and no fingerprint check runs.
+     * Set via `PaidMcpServerConfig.accessKeyBinding: 'wallet'`. Under
+     * that mode this field is *mandatory*: {@link issueRecord} refuses
+     * to mint a record without it rather than fall back to a bearer
+     * token. When binding is `'none'` (the default for backward
+     * compat), this field is `undefined` and no fingerprint check runs.
      */
     boundTo?: string
+}
+
+/**
+ * Normalize a wallet address for binding comparisons, or return
+ * `undefined` if the value isn't a syntactically valid 20-byte hex
+ * address.
+ *
+ * Two reasons this exists:
+ *
+ * 1. **Case.** Ethereum addresses are case-insensitive on the wire;
+ *    EIP-55 uses casing only as a checksum. viem hands the client a
+ *    checksummed (mixed-case) address while a payment credential may
+ *    carry a lowercased one, so a case-sensitive comparison would
+ *    reject legitimate clients. We compare lowercased forms.
+ * 2. **Validity.** A key must never be bound to a garbage value. An
+ *    empty string, a truncated address, or a non-string all read as
+ *    "payer unknown" so callers fail closed instead of minting a
+ *    record whose binding can never match anything.
+ */
+export function normalizeWalletAddress(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return undefined
+    return trimmed.toLowerCase()
 }
 
 /** Parse a compact duration string like '7d', '30m', '4h', '60s' into milliseconds. */
@@ -95,14 +130,40 @@ export function validateAccessKeyPricing(
     }
 }
 
-/** Build a fresh AccessKeyRecord from a pricing config. */
+/**
+ * Build a fresh AccessKeyRecord from a pricing config.
+ *
+ * Fails closed under wallet binding: if `binding` is `'wallet'` and no
+ * usable `boundTo` address is supplied, this throws instead of minting
+ * an unbound record. Silently dropping the binding would downgrade the
+ * key to a bearer token that any holder could replay — the exact
+ * property `accessKeyBinding: 'wallet'` is configured to prevent.
+ */
 export function issueRecord(args: {
     toolName: string
     pricing: Extract<PricingModel, { type: 'access-key' }>
     paymentReference?: string
+    /**
+     * Binding mode in force for this issuance. Under `'wallet'` a
+     * valid `boundTo` address is required. Defaults to `'none'`
+     * (bearer keys) to match the server default.
+     */
+    binding?: 'none' | 'wallet'
     /** When binding is enabled, the wallet address to lock this key to. */
     boundTo?: string
 }): AccessKeyRecord {
+    const boundTo = normalizeWalletAddress(args.boundTo)
+    if (args.binding === 'wallet' && boundTo === undefined) {
+        // Callers must resolve the payer before minting. The server does
+        // this in `runAccessKey` and reports a caller-facing error; if we
+        // get here the invariant leaked, so refuse rather than weaken the
+        // key.
+        throw new InternalError(
+            `Refusing to issue an access key for "${args.toolName}": binding is 'wallet' but no valid ` +
+            `payer address was supplied (got ${JSON.stringify(args.boundTo)}). An unbound key would be ` +
+            `redeemable by any holder, so issuance fails closed instead.`
+        )
+    }
     const now = Date.now()
     // 32 bytes of crypto randomness — keys look like `mppmcp_<hex>`.
     // Uses Web Crypto via the runtime adapter so this works in Node,
@@ -119,14 +180,52 @@ export function issueRecord(args: {
         expiresAt,
         remainingCalls,
         paymentReference: args.paymentReference,
-        ...(args.boundTo && { boundTo: args.boundTo }),
+        ...(boundTo && { boundTo }),
     }
 }
+
+/** Why a redemption was refused. */
+export type RedeemFailureReason =
+    /** No record for this token. */
+    | 'unknown'
+    /** The token authorizes a different tool. */
+    | 'wrong-tool'
+    /** The presenter's wallet doesn't match the record's `boundTo`. */
+    | 'wrong-client'
+    /**
+     * The server requires wallet binding but this record carries no
+     * binding, so there's no wallet to check the presenter against.
+     * Honoring it would treat the token as a bearer credential.
+     */
+    | 'unbound-key'
+    /** Past `expiresAt`. */
+    | 'expired'
+    /** `remainingCalls` hit zero. */
+    | 'exhausted'
 
 /** Outcome of attempting to redeem (use) an access key for a tool call. */
 export type RedeemResult =
     | { ok: true; record: AccessKeyRecord }
-    | { ok: false; reason: 'unknown' | 'wrong-tool' | 'wrong-client' | 'expired' | 'exhausted' }
+    | { ok: false; reason: RedeemFailureReason }
+
+/** Binding inputs for a redemption attempt. */
+export interface RedeemOptions {
+    /**
+     * Wallet address presented by the requesting client, read from
+     * `_meta[ACCESS_KEY_FINGERPRINT_META]`. Compared case-insensitively
+     * against the record's `boundTo`.
+     */
+    clientFingerprint?: string
+    /**
+     * Set when the server runs with `accessKeyBinding: 'wallet'`. Makes
+     * a present, matching `boundTo` mandatory: records without one are
+     * refused with `'unbound-key'` rather than accepted as bearer
+     * tokens. Without this flag an unbound record (minted before
+     * binding was turned on, or by a peer instance running with binding
+     * off against a shared store) would authorize any presenter.
+     */
+    requireBinding?: boolean
+}
 
 /**
  * Atomically redeem one call against an access key. On success returns
@@ -155,15 +254,16 @@ export type RedeemResult =
  * the in-memory adapter the transform runs exactly once. On Upstash
  * with concurrent contention the transform may run multiple times.
  *
- * @param clientFingerprint When the record has `boundTo` set, the
- *   caller must supply the requesting client's wallet address. If the
- *   fingerprint doesn't match, redemption fails with `'wrong-client'`.
+ * @param options Binding inputs. See {@link RedeemOptions} — supply
+ *   `requireBinding` whenever the server is configured with
+ *   `accessKeyBinding: 'wallet'` so unbound records are refused
+ *   instead of honored as bearer tokens.
  */
 export async function redeem(
     store: MppMcpStore,
     key: string,
     toolName: string,
-    clientFingerprint?: string
+    options?: RedeemOptions
 ): Promise<RedeemResult> {
     /**
      * The transform's chosen outcome. Captured in this variable so the
@@ -188,9 +288,29 @@ export async function redeem(
         // `boundTo` address, only the original client may use it.
         // This prevents stolen keys from being replayed by a
         // different wallet.
-        if (record.boundTo && clientFingerprint !== record.boundTo) {
+        const declaresBinding =
+            record.boundTo !== undefined && record.boundTo !== null && record.boundTo !== ''
+        const boundTo = normalizeWalletAddress(record.boundTo)
+        if (declaresBinding && boundTo === undefined) {
+            // The record claims a binding we can't parse (corrupted or
+            // schema-drifted store value). Refuse rather than fall back
+            // to bearer semantics, which is what ignoring an
+            // unparseable `boundTo` would amount to.
             outcome = { ok: false, reason: 'wrong-client' }
             return record // leave the record untouched
+        }
+        if (options?.requireBinding && boundTo === undefined) {
+            // Server enforces wallet binding but this record has none,
+            // so there is nothing to check the presenter against.
+            outcome = { ok: false, reason: 'unbound-key' }
+            return record // leave the record untouched
+        }
+        if (boundTo !== undefined) {
+            const presented = normalizeWalletAddress(options?.clientFingerprint)
+            if (presented === undefined || presented !== boundTo) {
+                outcome = { ok: false, reason: 'wrong-client' }
+                return record // leave the record untouched
+            }
         }
 
         if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
