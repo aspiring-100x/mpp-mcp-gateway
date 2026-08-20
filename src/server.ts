@@ -25,6 +25,7 @@ import type { z } from 'zod'
 
 import {
     issueRecord,
+    normalizeWalletAddress,
     redeem,
     storeRecord,
     toClientView,
@@ -45,7 +46,7 @@ import {
     TEMPO_MAINNET,
     TEMPO_TESTNET,
 } from './constants.js'
-import { ConfigurationError, InternalError, RateLimitExceededError, ShutdownTimeoutError, ShuttingDownError } from './errors.js'
+import { ConfigurationError, InternalError, RateLimitExceededError, ShutdownTimeoutError, ShuttingDownError, ValidationError } from './errors.js'
 import { defaultLogger, type Logger } from './logger.js'
 import {
     noopLimiter,
@@ -803,10 +804,22 @@ export class PaidMcpServer {
                 // Extract the client fingerprint from the request
                 // metadata when binding is enabled. The client SDK
                 // includes its wallet address automatically.
-                const fingerprint = this.accessKeyBinding === 'wallet'
-                    ? readAccessKeyFingerprint(extra)
-                    : undefined
-                outcome = await redeem(this.accessKeyStore, incomingKey, tool.name, fingerprint)
+                //
+                // `requireBinding` makes the check mandatory rather than
+                // conditional on the record: under wallet binding a
+                // record with no `boundTo` is refused instead of being
+                // honored as a bearer token.
+                outcome = await redeem(
+                    this.accessKeyStore,
+                    incomingKey,
+                    tool.name,
+                    this.accessKeyBinding === 'wallet'
+                        ? {
+                            requireBinding: true,
+                            clientFingerprint: readAccessKeyFingerprint(extra),
+                        }
+                        : undefined
+                )
                 redeemSpan.setAttribute(
                     'mppmcp.access-key.outcome',
                     outcome.ok ? 'ok' : outcome.reason
@@ -844,12 +857,29 @@ export class PaidMcpServer {
                     reason: outcome.reason,
                 })
             }
+            // A binding rejection is worth surfacing on its own: a burst
+            // of these means either a stolen key being replayed from a
+            // different wallet, or a store shared with an instance that
+            // has binding disabled.
+            if (outcome.reason === 'wrong-client' || outcome.reason === 'unbound-key') {
+                this.logger.warn('access key rejected by wallet binding', {
+                    tool: tool.name,
+                    reason: outcome.reason,
+                })
+            }
             // Fall through to the pay flow — agent will need to pay again.
         }
 
         // No key (or rejected). Charge the upfront fee.
         rootSpan.setAttribute(TRACE_ATTRS.PAYMENT_MODE, 'access-key')
         rootSpan.setAttribute(TRACE_ATTRS.AMOUNT, pricing.amount)
+
+        // Fail closed *before* any funds move. Under wallet binding the
+        // payer's address is a hard requirement for issuing a key, so a
+        // request carrying a credential we can't attribute is rejected
+        // here rather than after settlement — the client keeps its money
+        // and gets an actionable error instead of a bearer key.
+        this.resolveKeyBinding(extra, tool.name, 'pre-charge')
 
         const chargeSpan = startSpan(this.tracer, TRACE_SPANS.PAYMENT_CHARGE, {
             [TRACE_ATTRS.TOOL_NAME]: tool.name,
@@ -877,18 +907,19 @@ export class PaidMcpServer {
             chargeSpan.end()
         }
 
-        // Payment cleared. Run the handler, then issue a new key.
-        const result = await this.runUserHandler(tool, args)
+        // Payment cleared. Mint the key record before running the
+        // handler: when binding is enabled this is where we lock the key
+        // to the wallet that just paid, and if the payer can't be
+        // resolved we refuse to issue at all — no point doing the work
+        // for a call we're about to reject.
+        const boundTo = this.resolveKeyBinding(extra, tool.name, 'post-charge')
         const record = issueRecord({
             toolName: tool.name,
             pricing,
-            // When binding is enabled, lock the key to the wallet
-            // that just paid. Extract the address from the credential
-            // the client submitted during the charge flow.
-            ...(this.accessKeyBinding === 'wallet' && {
-                boundTo: readPayerAddress(extra),
-            }),
+            binding: this.accessKeyBinding,
+            ...(boundTo !== undefined && { boundTo }),
         })
+        const result = await this.runUserHandler(tool, args)
         await storeRecord(this.accessKeyStore, record)
         this.issuedKeyTokens.add(record.key)
         this.stats.accessKeysIssued++
@@ -943,6 +974,59 @@ export class PaidMcpServer {
             ...(receipt?.reference && { txHash: receipt.reference }),
         })
         return attachAccessKey(withReceipt, decremented, true)
+    }
+
+    /**
+     * @internal Resolve the wallet address a freshly issued access key
+     * will be bound to.
+     *
+     * Returns `undefined` when `accessKeyBinding` is `'none'` — the
+     * default, where keys are bearer tokens by design. Under `'wallet'`
+     * the payer must be identifiable, so this throws rather than
+     * returning `undefined`: letting the caller mint an unbound key
+     * would silently downgrade the configured security property, leaving
+     * a token any holder could replay.
+     *
+     * `phase` only shapes the failure:
+     *
+     * - `'pre-charge'` runs before settlement. A request with no payment
+     *   credential at all is normal here (it's the probe that earns a 402
+     *   challenge, and the client attaches a credential on retry), so
+     *   only a credential we can't read is an error. Rejecting at this
+     *   point costs the client nothing.
+     * - `'post-charge'` runs once payment has settled, where an
+     *   unidentifiable payer is always an error.
+     */
+    private resolveKeyBinding(
+        extra: Record<string, unknown> & { _meta?: Record<string, unknown> },
+        toolName: string,
+        phase: 'pre-charge' | 'post-charge'
+    ): string | undefined {
+        if (this.accessKeyBinding !== 'wallet') return undefined
+
+        const payer = readPayerAddress(extra)
+        if (payer !== undefined) return payer
+
+        // No credential yet — the 402 challenge path. Re-checked on the
+        // paid retry, which is when the credential arrives.
+        if (phase === 'pre-charge' && readPaymentCredential(extra) === undefined) {
+            return undefined
+        }
+
+        this.logger.error('wallet-bound access key issuance blocked', {
+            tool: toolName,
+            phase,
+        })
+        throw new ValidationError(
+            `Tool "${toolName}" issues wallet-bound access keys (accessKeyBinding: 'wallet') but the ` +
+            `payer's wallet address could not be read from the MPP payment credential, so there is no ` +
+            `wallet to bind the key to. ` +
+            (phase === 'pre-charge'
+                ? `The call was rejected before settlement — no payment was taken. `
+                : `The payment settled but no access key was issued. `) +
+            `The credential must carry a valid "from" address at the top level or under "payload". ` +
+            `Set accessKeyBinding: 'none' if bearer keys are acceptable for this deployment.`
+        )
     }
 
     /** @internal Update stats for a successful paid call. */
@@ -1479,28 +1563,47 @@ function readAccessKeyFingerprint(
 }
 
 /**
- * @internal Extract the payer's wallet address from the payment
- * credential attached to the MCP request. The credential is placed
- * at `_meta['org.paymentauth/credential']` by the mppx/mcp-sdk
- * transport layer. The `from` field contains the signing address.
+ * @internal Read the MPP payment credential attached to an MCP
+ * request. The credential is placed at
+ * `_meta['org.paymentauth/credential']` by the mppx/mcp-sdk transport
+ * layer once the client has signed a payment.
  *
- * Returns `undefined` if the address can't be extracted — the
- * binding will still succeed (the key will be issued without a
- * bound address), which is a graceful degradation rather than
- * a hard failure.
+ * `undefined` means the request carries no payment — the normal state
+ * of a first call, which earns a 402 challenge.
+ */
+function readPaymentCredential(
+    extra: Record<string, unknown> & { _meta?: Record<string, unknown> }
+): { payload?: { from?: unknown }; from?: unknown } | undefined {
+    const meta = extra._meta
+    if (!meta) return undefined
+    const credential = meta['org.paymentauth/credential']
+    if (typeof credential !== 'object' || credential === null) return undefined
+    return credential as { payload?: { from?: unknown }; from?: unknown }
+}
+
+/**
+ * @internal Extract the payer's wallet address from the payment
+ * credential attached to the MCP request. The `from` field carries the
+ * signing address.
+ *
+ * Returns `undefined` when there's no credential, or when the
+ * credential's `from` field is missing or isn't a valid address.
+ * Callers under `accessKeyBinding: 'wallet'` must treat that as a hard
+ * failure — see {@link PaidMcpServer.resolveKeyBinding}. Degrading to
+ * an unbound key instead would hand the caller a bearer token that any
+ * holder could replay, defeating the point of binding.
  */
 function readPayerAddress(
     extra: Record<string, unknown> & { _meta?: Record<string, unknown> }
 ): string | undefined {
-    const meta = extra._meta
-    if (!meta) return undefined
-    const credential = meta['org.paymentauth/credential'] as
-        | { payload?: { from?: string }; from?: string }
-        | undefined
+    const credential = readPaymentCredential(extra)
     if (!credential) return undefined
     // mppx places the sender address either at credential.from
     // or credential.payload.from depending on the intent shape.
-    return credential.from ?? credential.payload?.from ?? undefined
+    return (
+        normalizeWalletAddress(credential.from) ??
+        normalizeWalletAddress(credential.payload?.from)
+    )
 }
 
 /**

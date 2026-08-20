@@ -22,8 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **BREAKING:** Upgraded `mppx` from deprecated `0.1.1` to `0.4.11` or newer. Session-priced servers now require a separate `sessionAccountKey` so mppx can sign channel settlement, while `feePayerKey` retains its fee-sponsorship semantics. The gateway now uses the current Tempo escrow contracts.
 
+### Fixed
+- **Wallet-bound access keys could be issued unbound** ([#1](https://github.com/aspiring-100x/mpp-mcp-gateway/issues/1), finding `MCP-GATEWAY-001`). Under `accessKeyBinding: 'wallet'`, if the payer's address could not be read from the payment credential, the key was minted with no `boundTo` and silently degraded to a bearer token that any holder could replay. Issuance and redemption now both fail closed — see **Security** below.
+- Access-key binding comparisons are now case-insensitive. Ethereum addresses are case-insensitive on the wire (EIP-55 casing is only a checksum), so the previous exact-string compare could reject the legitimate payer when the client's checksummed address met a lowercased credential.
+
 ### Security
 - Removed the vulnerable `mppx` range affected by the critical payment-bypass advisory GHSA-8x4m-qw58-3pcx, Stripe replay advisory GHSA-8mhj-rffc-rcvw, and Tempo session-voucher advisory GHSA-mv9j-8jvg-j8mr.
+- **`accessKeyBinding: 'wallet'` now fails closed.** Three changes, none of which affect the default `'none'` (bearer) mode:
+  - A request carrying a payment credential whose payer cannot be resolved is rejected with a `ValidationError` **before** the charge is issued, so the client keeps its funds. Requests with no credential are unaffected — those still receive the normal 402 challenge.
+  - `issueRecord` refuses to mint a record when binding is `'wallet'` and no valid payer address is supplied, instead of dropping the field.
+  - `redeem` requires a present, matching `boundTo` when the server enforces binding. Records with no binding are refused with the new `'unbound-key'` reason rather than honored as bearer tokens, which closes the case of a key minted before binding was enabled (or by a peer instance running with binding off against a shared store). Binding rejections do not consume a call from the key's budget.
 
 ---
 

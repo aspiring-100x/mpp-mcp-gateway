@@ -200,6 +200,14 @@ export interface PaidMcpServerConfig {
      *   wallet address in `_meta['org.mppmcp/access-key-fingerprint']`.
      *   The client SDK handles this automatically.
      *
+     * `'wallet'` fails closed. If the payer's address can't be read from
+     * the payment credential the call is rejected rather than served an
+     * unbound key — before the charge is issued, so the client keeps its
+     * funds. On redemption, a key with no binding is refused instead of
+     * being honored as a bearer token, so enabling this mode also
+     * invalidates any unbound keys already in the store. Addresses are
+     * compared case-insensitively.
+     *
      * @default 'none'
      */
     accessKeyBinding?: 'none' | 'wallet'
