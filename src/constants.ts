@@ -31,9 +31,29 @@ export const TESTNET_TOKENS = {
 /** Default fee token (pathUSD) */
 export const DEFAULT_CURRENCY = TESTNET_TOKENS.pathUSD
 
-/** Tempo escrow contract addresses (used for session-priced tools). */
+/**
+ * Canonical TIP-1034 TIP-20 Channel Escrow precompile.
+ *
+ * Session pricing settles against this address on every Tempo chain, so it
+ * is not network-specific. Current clients expect it, and the server
+ * advertises it by default — leave `escrowContract` unset unless you have a
+ * specific reason to pin a different one.
+ */
+export const TEMPO_CHANNEL_ESCROW =
+    '0x4d50500000000000000000000000000000000000' as `0x${string}`
+
+/**
+ * Legacy per-network escrow **contract** addresses.
+ *
+ * @deprecated Superseded by {@link TEMPO_CHANNEL_ESCROW}. These predate the
+ * TIP-1034 precompile and are retained only so deployments that explicitly
+ * pinned them via `escrowContract` keep working. A server that advertises
+ * one of these to a current client is rejected with an escrow mismatch,
+ * because the client negotiates the precompile.
+ */
 export const TEMPO_ESCROW_TESTNET =
     '0xe1c4d3dce17bc111181ddf716f75bae49e61a336' as `0x${string}`
+/** @deprecated See {@link TEMPO_ESCROW_TESTNET}. */
 export const TEMPO_ESCROW_MAINNET =
     '0x33b901018174DDabE4841042ab76ba85D4e24f25' as `0x${string}`
 

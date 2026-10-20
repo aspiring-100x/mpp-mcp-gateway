@@ -15,7 +15,7 @@ import { TESTNET_TOKENS } from '../src/constants.js'
 import { TEST_AGENT_KEY } from './helpers.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const SECRET = 'multi-currency-test-secret'
+const SECRET = 'multi-currency-test-secret-x-x-x'
 
 function getOffers(doc: Record<string, unknown>, toolName: string) {
     const paths = doc.paths as Record<string, { post: Record<string, unknown> }>

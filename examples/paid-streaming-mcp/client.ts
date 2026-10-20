@@ -53,7 +53,7 @@ async function main() {
                 process.env.RECIPIENT_ADDRESS ??
                 '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
             PAYMENT_SECRET_KEY:
-                process.env.PAYMENT_SECRET_KEY ?? 'dev-secret-key-change-me-please',
+                process.env.PAYMENT_SECRET_KEY ?? 'dev-secret-key-change-me-please-32-bytes',
         },
     })
 

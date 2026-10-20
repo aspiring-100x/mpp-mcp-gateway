@@ -48,8 +48,16 @@ interface ClientInternals {
         }
     >
     wrapped: {
+        /**
+         * Mirrors the MCP SDK signature mppx preserves:
+         * `callTool(params, resultSchema?, options?)`. The credential
+         * context travels in the third argument — a two-parameter stub
+         * would silently capture `undefined` and pass while the real call
+         * shape was wrong.
+         */
         callTool: (
             params: { name: string; arguments?: Record<string, unknown> },
+            resultSchema?: unknown,
             options?: { context?: unknown }
         ) => Promise<{
             content: unknown[]
@@ -128,7 +136,7 @@ describe('closeSession — wire shape', () => {
             options?: { context?: Record<string, unknown> }
         } = {}
         internal.wrapped = {
-            callTool: async (params, options) => {
+            callTool: async (params, _resultSchema, options) => {
                 captured = {
                     name: params.name,
                     options,

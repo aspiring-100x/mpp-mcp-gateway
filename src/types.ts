@@ -189,6 +189,21 @@ export interface PaidMcpServerConfig {
      */
     accessKeyStore?: unknown
     /**
+     * Pluggable store backing payment replay protection.
+     *
+     * Every settled one-shot payment records a marker so the same
+     * transaction or proof cannot authorize a second tool call. That marker
+     * must be visible to every process that can serve a paid call, so a
+     * multi-instance or restartable deployment requires a shared atomic
+     * store (for example `Store.upstash(redis)`).
+     *
+     * When omitted, falls back to {@link PaidMcpServerConfig.sessionStore},
+     * then {@link PaidMcpServerConfig.accessKeyStore}, then an in-memory
+     * store with a startup warning. In-memory replay protection applies
+     * only within a single process and is lost on restart.
+     */
+    replayStore?: unknown
+    /**
      * Access-key binding mode. Controls whether issued access keys are
      * bound to the paying client's identity, preventing replay attacks
      * if a key is intercepted on an unencrypted transport.

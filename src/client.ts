@@ -57,6 +57,21 @@ export class PaidMcpClient {
     private config: Required<Pick<PaidMcpClientConfig, 'network'>> & PaidMcpClientConfig
     private rawClient: Client
     private wrapped!: ReturnType<typeof buildWrapped>
+    /**
+     * The MCP SDK's own `callTool`, captured before mppx wraps the client.
+     *
+     * `McpClient.wrap` replaces `callTool` on the client **in place** and
+     * returns the same reference, so `rawClient.callTool` is payment-aware
+     * after wrapping. Using it for the initial probe would let mppx sign and
+     * settle a payment before this layer ever inspects the challenge —
+     * silently bypassing `maxPerCall` / `maxTotal`.
+     *
+     * Holding the pre-wrap method keeps the two phases distinct: probe
+     * without a credential (so free tools and valid access keys cost
+     * nothing), enforce caps against the returned challenge, then retry
+     * through {@link PaidMcpClient.wrapped} to actually pay.
+     */
+    private probeCallTool!: Client['callTool']
     private logger: Logger
     /**
      * Spending caps and tracking in base units (BigInt, 6 decimals).
@@ -168,6 +183,11 @@ export class PaidMcpClient {
         const account = privateKeyToAccount(config.privateKey)
         this.walletAddress = account.address
 
+        // Capture the unpaid call path before mppx replaces `callTool` on
+        // this client. Order matters: after `buildWrapped` returns, every
+        // method on `rawClient` pays automatically.
+        this.probeCallTool = this.rawClient.callTool.bind(this.rawClient)
+
         // tempo() returns [chargeIntent, sessionIntent]. Passing `deposit`
         // puts the session intent in auto-mode — it manages channel open,
         // vouchers, and tracking on its own. We feed it our maxSessionDeposit
@@ -248,7 +268,8 @@ export class PaidMcpClient {
         // the mppx wrapped retry below.
         let firstResult: Awaited<ReturnType<Client['callTool']>>
         try {
-            firstResult = await this.rawClient.callTool({
+            // Deliberately the pre-wrap method: this probe must not pay.
+            firstResult = await this.probeCallTool({
                 name,
                 arguments: args ?? {},
                 ...(baseMeta && { _meta: baseMeta }),
@@ -525,11 +546,15 @@ export class PaidMcpClient {
         // the channel — any session-priced tool would work, but
         // using the originating tool keeps server-side stats and
         // logs aligned with the channel lifecycle.
+        // `callTool(params, resultSchema?, options?)` — the credential
+        // context belongs in the third (options) argument. Passing it
+        // second would be read as a result schema and silently dropped.
         const result = await this.wrapped.callTool(
             {
                 name: toolName,
                 arguments: {},
             },
+            undefined,
             {
                 context: {
                     action: 'close',

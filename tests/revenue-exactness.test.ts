@@ -20,7 +20,7 @@ import { createPaidMcpServer } from '../src/server.js'
 import type { PaidMcpServer } from '../src/server.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const SECRET = 'revenue-exactness-test-secret'
+const SECRET = 'revenue-exactness-test-secret-x-x'
 
 /** Cast the server to expose its private `recordPaidCall` for direct invocation. */
 function asInternal(server: PaidMcpServer): {

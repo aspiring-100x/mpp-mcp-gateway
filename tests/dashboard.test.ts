@@ -79,7 +79,7 @@ describe('call log (ring buffer)', () => {
             name: 'cap-test',
             version: '0.0.0',
             recipient: RECIPIENT,
-            secretKey: 's',
+            secretKey: 's-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x',
             callLogSize: 3,
             tools: [],
         })

@@ -19,7 +19,7 @@ import { z } from 'zod'
 
 const RECIPIENT = (process.env.RECIPIENT_ADDRESS ??
     '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266') as `0x${string}`
-const SECRET = process.env.PAYMENT_SECRET_KEY ?? 'dev-secret-key-change-me-please'
+const SECRET = process.env.PAYMENT_SECRET_KEY ?? 'dev-secret-key-change-me-please-32-bytes'
 
 // Fake weather "database" for the demo. In production this would be a real API.
 const FAKE_WEATHER: Record<string, { tempF: number; condition: string }> = {

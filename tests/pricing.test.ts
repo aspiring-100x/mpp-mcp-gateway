@@ -12,7 +12,7 @@ import { z } from 'zod'
 import { createPaidMcpServer } from '../src/server.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const SECRET = 'pricing-test-secret'
+const SECRET = 'pricing-test-secret-x-x-x-x-x-x-x'
 
 describe('pricing', () => {
     it('reports null price for a tool with no pricing (free)', () => {

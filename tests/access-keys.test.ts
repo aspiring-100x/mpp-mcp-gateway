@@ -26,7 +26,7 @@ import { createMemoryStore } from '../src/stores/index.js'
 import { makeConnectedPair } from './helpers.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const SECRET = 'access-key-test-secret'
+const SECRET = 'access-key-test-secret-x-x-x-x-x'
 
 const cleanup: Array<() => Promise<void>> = []
 

@@ -59,6 +59,7 @@ import {
     isMppMcpStore,
     type MppMcpStore,
 } from './stores/index.js'
+import { toMppxAtomicStore } from './stores/mppx.js'
 import {
     startSpan,
     TRACE_ATTRS,
@@ -1392,12 +1393,21 @@ function createMppxPayment(
 ) {
     const useSessions = hasSessionPricing(config.tools)
 
-    // tempo() with sessions enabled needs a Store and an escrow contract.
-    // Without sessions we can keep things minimal — just charge.
+    // Charge replay protection must be backed by the operator's store.
+    // mppx defaults to a fresh in-memory store when none is supplied, which
+    // means consumed transaction hashes and proofs are invisible to other
+    // replicas and are lost on restart — a settled payment could then
+    // authorize service again from a different process. `replayStore` is
+    // the explicit knob; we fall back to the session or access-key store so
+    // existing deployments that already point those at Redis inherit the
+    // fix, and warn loudly when nothing durable is available.
+    const replayStore = resolveReplayStore(config, logger)
+
     const chargeParams: Parameters<typeof tempo.charge>[0] = {
         currency: config.currency,
         recipient: config.recipient,
         testnet: config.network === 'testnet',
+        store: toMppxAtomicStore(replayStore),
     }
 
     const feePayerAccount = config.feePayerKey
@@ -1417,24 +1427,43 @@ function createMppxPayment(
                 'sessionAccountKey is required when any tool uses session pricing; mppx needs the operator account to settle the channel on Tempo'
             )
         }
-        const escrow =
-            config.escrowContract ??
-            (config.network === 'mainnet' ? TEMPO_ESCROW_MAINNET : TEMPO_ESCROW_TESTNET)
+        // Do not pin an escrow unless the operator asked for one. Session
+        // channels now settle against the canonical TIP-1034 precompile,
+        // which clients negotiate themselves; advertising the legacy
+        // per-network contract address instead makes every client reject
+        // the channel with an escrow mismatch.
         // Resolve the session store using the same logic as the
         // access-key store: native MppMcpStore → use directly, legacy
-        // three-method → bridge, nothing → in-memory default. mppx
-        // only consumes get/put/delete from the store, so any of the
-        // three forms is structurally compatible.
+        // three-method → bridge, nothing → in-memory default. Session
+        // mutations (spent, highest voucher, top-up, close) must be
+        // linearizable across instances, so the store is adapted to mppx's
+        // atomic contract rather than its three-method subset.
         const store = resolveStore(config.sessionStore, logger)
 
+        // Floor every voucher increment at the cheapest session-priced tool.
+        // mppx defaults this to "0", which accepts an arbitrarily small
+        // positive delta — a client could advance a channel by one base unit
+        // and still be served. This does not yet enforce the exact per-tool
+        // price; `runSession` supplies that per call.
+        const minVoucherDelta = minimumSessionAmount(config.tools)
+
+        // Session pricing selects its network by explicit chain ID; the
+        // boolean `testnet` shorthand that `charge` still accepts is not
+        // part of the session contract.
         const sessionParams: Parameters<typeof tempo.session>[0] = {
             account: sessionAccount,
             currency: config.currency,
             recipient: config.recipient,
-            testnet: config.network === 'testnet',
+            chainId:
+                config.network === 'mainnet'
+                    ? TEMPO_MAINNET.chainId
+                    : TEMPO_TESTNET.chainId,
             ...(feePayerAccount ? { feePayer: feePayerAccount } : {}),
-            escrowContract: escrow,
-            store,
+            ...(config.escrowContract
+                ? { escrowContract: config.escrowContract }
+                : {}),
+            store: toMppxAtomicStore(store),
+            ...(minVoucherDelta !== undefined && { minVoucherDelta }),
             sse: false,
         }
         sessionMethod = tempo.session(sessionParams)
@@ -1451,6 +1480,56 @@ function createMppxPayment(
         secretKey: config.secretKey,
         transport: Transport.mcpSdk(),
     })
+}
+
+/**
+ * @internal Pick the store that backs mppx charge replay protection.
+ *
+ * Preference order: the explicit `replayStore`, then the session store,
+ * then the access-key store. Operators who already point either of those
+ * at Redis get durable, cross-instance replay protection without changing
+ * their configuration.
+ *
+ * Falling through to memory is safe only for a single-process deployment,
+ * so that case warns: replay markers written there are invisible to other
+ * replicas and vanish on restart.
+ */
+function resolveReplayStore(
+    config: PaidMcpServerConfig,
+    logger: Logger
+): MppMcpStore {
+    const configured =
+        config.replayStore ?? config.sessionStore ?? config.accessKeyStore
+    if (configured !== undefined && configured !== null) {
+        return resolveStore(configured, logger)
+    }
+    logger.warn(
+        'charge replay protection is backed by an in-memory store; consumed payments are not shared across instances and are lost on restart. Set `replayStore` (or `sessionStore`/`accessKeyStore`) to a shared atomic store such as Store.upstash() for multi-instance or restartable deployments.'
+    )
+    return createMemoryStore()
+}
+
+/**
+ * @internal Smallest configured session price, as a decimal string, or
+ * `undefined` when no tool uses session pricing.
+ *
+ * Used as the floor for voucher increments. Comparison is done in base
+ * units so that `'0.01'` and `'0.010'` order correctly and no precision is
+ * lost to float parsing.
+ */
+function minimumSessionAmount(
+    tools: readonly PaidToolDefinition[]
+): string | undefined {
+    let smallest: { units: bigint; amount: string } | undefined
+    for (const tool of tools) {
+        if (tool.pricing?.type !== 'session') continue
+        const amount = tool.pricing.amount
+        const units = usdStringToBaseUnits(amount, REVENUE_DECIMALS)
+        if (smallest === undefined || units < smallest.units) {
+            smallest = { units, amount }
+        }
+    }
+    return smallest?.amount
 }
 
 /**

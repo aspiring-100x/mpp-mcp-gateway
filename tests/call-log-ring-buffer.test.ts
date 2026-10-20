@@ -18,7 +18,7 @@ import type { PaidMcpServer } from '../src/server.js'
 import type { CallLogEntry } from '../src/types.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const SECRET = 'ring-buffer-test-secret'
+const SECRET = 'ring-buffer-test-secret-x-x-x-x-x'
 
 /** @internal Cast through the prototype to call the private `appendCall`. */
 function appender(server: PaidMcpServer): (e: CallLogEntry) => void {

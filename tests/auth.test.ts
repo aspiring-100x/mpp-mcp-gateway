@@ -312,7 +312,7 @@ describe('basicAuth', () => {
 // -------------------------------------------------------------------
 
 describe('signedQuery', () => {
-    const SECRET = 'shared-secret-value'
+    const SECRET = 'shared-secret-value-x-x-x-x-x-x-x'
 
     function sign(path: string, params: Record<string, string>): string {
         const sorted = Object.entries(params).sort(([a], [b]) =>

@@ -26,7 +26,7 @@ import { createPaidMcpServer } from '../src/server.js'
 import { makeConnectedPair } from './helpers.js'
 
 const RECIPIENT = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as const
-const SECRET = 'metrics-test-secret'
+const SECRET = 'metrics-test-secret-x-x-x-x-x-x-x'
 
 const cleanup: Array<() => Promise<void>> = []
 
